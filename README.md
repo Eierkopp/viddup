@@ -1,47 +1,49 @@
-# FileUploadServer
+viddup
+======
 
-Small HTTP(S) server to share some files.
+`viddup` is a small tool to detect duplicate video scenes
 
-Inspired by droopy but with support for
+Usage
+=====
 
-- multiple directories
-- muliple accounts
-- letsencrypt certificate renewal
+There are three typical use-cases for viddup:
 
-## Letsencrypt Support (untested)
+1. Import video hashes into a database
+1. Search hashes for duplicates
+1. Remove obsolete entries from the database
+    
+## Importing Hashes
 
-Letsencrypt certificate renewal offers a HTTP01_challenge consisting of
-`token` and `thumb` to be downloadable from URL
+Import all movies from a directory
 
-`http://domain/.well-known/acme-challenge/token`.
+        viddup --db database --dir directory
+ 
+## Search Hash Database
 
-To install the challenge on the FileUploadServer just issue an HTTP
-GET to URL
+Search database for possible duplicates and dump results as a `json`
+structure
 
-`http://domain/.well-known/acme-challenge/upload/token/thumb`, e.g.
+        viddup --db database --search 
+    
 
-    curl -i http://my.domain/.well-known/acme-challenge/upload/some_token/some_thumb
-    HTTP/1.0 200 OK
-    Content-Type: text/plain; charset=utf-8
-    Content-Length: 2
-    Server: Werkzeug/0.12.2-dev Python/3.6.3
-    Date: Mon, 20 Nov 2017 10:24:55 GMT
+## Remove Obsolete Database Entries
 
-    ok
+List all filenames that need to be purged from the database:
 
-Now the challenge will be answered:
+        viddup --db database --purge
+    
+Really purge the database
 
-    % curl -i http://my.domain/.well-known/acme-challenge/some_token 
-    HTTP/1.0 200 OK
-    Content-Type: text/plain; charset=utf-8
-    Content-Length: 21
-    Server: Werkzeug/0.12.2-dev Python/3.6.3
-    Date: Mon, 20 Nov 2017 10:26:17 GMT
+        viddup --db database --purge --delete
+    
 
-    some_token.some_thumb%
+Installation
+============
 
+`viddup` needs one of the following k-nearest-neighbor libraries to
+work. 
 
-## Installation
-
-
+- [hnswlib](https://github.com/nmslib/hnsw)
+- [cyflann](https://github.com/dougalsutherland/cyflann)
+- [annoy](https://github.com/spotify/annoy)
 
