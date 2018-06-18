@@ -2,3 +2,11 @@ auto_build.sh
 README.pdf
 
 *~
+
+debian/.debhelper/
+debian/files
+debian/viddup.debhelper.log
+debian/viddup.substvars
+debian/viddup/
+lib/__pycache__/
+viddup.sqlite3

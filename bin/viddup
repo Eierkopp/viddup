@@ -17,7 +17,7 @@ from gi.repository import GObject
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
 import imageio
-import vidhash
+from viddup import vidhash
 from scipy.signal import argrelmax
 import numpy as np
 
@@ -413,7 +413,7 @@ class VidDupUI(object):
 
     def start(self):
         self.builder = Gtk.Builder()
-        self.builder.add_from_file("viddup.glade")
+        self.builder.add_from_file("/usr/share/viddup/viddup.glade")
         
         window = self.builder.get_object("app")
 
