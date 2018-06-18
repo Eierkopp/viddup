@@ -20,10 +20,22 @@ Import all movies from a directory
  
 ## Search Hash Database
 
-Search database for possible duplicates and dump results as a `json`
-structure
+Search database for possible duplicates and logs results as `ffplay`
+commands
 
         viddup --db database --search 
+        
+E.g.:
+
+        INFO:root:Group of 2 files found
+        INFO:root:ffplay -ss 00:02:18 'Carinis-Classic-Cars-DMAX2018-02-1305-45.mkv'
+        INFO:root:ffplay -ss 00:22:18 'Carinis-Classic-Cars-DMAX2018-02-1305-25.mkv'
+
+You can launch a very basic UI with
+
+        viddup --db database --search --ui
+        
+![viddup](https://user-images.githubusercontent.com/6553148/41529788-8b29d570-72ee-11e8-9329-e241780c0bca.png)
     
 
 ## Remove Obsolete Database Entries
