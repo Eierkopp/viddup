@@ -1,0 +1,570 @@
+#!/usr/bin/python3
+
+import argparse
+from itertools import combinations
+import logging
+import json
+import os
+from pprint import pprint
+from random import randint
+import sqlite3 as db
+import subprocess
+import time
+import sys
+from tqdm import tqdm
+import gi
+from gi.repository import GObject
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk
+import imageio
+import vidhash
+from scipy.signal import argrelmax
+import numpy as np
+
+logging.basicConfig(level=logging.INFO)
+
+DB_URI_DEFAULT = "viddup.sqlite3"
+KNOWN_VID_TYPES = [".mp4", ".mkv", ".avi"]
+INDEX_DIST = 10 # seconds
+ANN_LIBS = []
+
+try:
+    import hnswlib
+    ANN_LIBS.append("hnswlib")
+except ModuleNotFoundError:
+    pass
+
+try:
+    import cyflann
+    ANN_LIBS.append("flann")
+except ModuleNotFoundError:
+    pass
+
+try:
+    import annoy
+    ANN_LIBS.append("annoy")
+except ModuleNotFoundError:
+    pass
+
+if not ANN_LIBS:
+    logging.error("Please install on of the k-nearest neighbor libraries: hnswlib, flann, or annoy")
+    sys.exit(1)
+
+def get_db():
+    conn = db.connect(DB_URI)
+    conn.execute("pragma busy_timeout = 300000").close()
+    return conn
+
+def get_files(basedir):
+    for root, _, files in os.walk(basedir):
+        for f in files:
+            _, ext = os.path.splitext(f)
+            if ext.lower() in KNOWN_VID_TYPES:
+                yield os.path.join(root, f)
+
+def dump_array(data, name):
+    with open(name, "w") as f:
+        f.write(json.dumps(data))
+        f.write("\n")
+
+def get_hashes(vidname):
+    logging.info("Hashing %s", vidname)
+    video = imageio.get_reader(vidname, "vidhash")
+    md = video.get_meta_data()
+    fps = md["fps"]
+    nframes = md["nframes"]
+    brightness = []
+    try:
+        for frame in tqdm(video.iter_data(), total=nframes, leave=False):
+            brightness.append(frame.mean())
+    except KeyboardInterrupt:
+        raise
+    except imageio.core.format.CannotReadFrameError:
+        pass
+    except Exception as e:
+        logging.warning("Error processing video: %s", e)
+
+    #dump_array(brightness, "raw_%s" % os.path.basename(vidname))
+    extrema = get_extrema(brightness, INDEX_DIST, fps)
+    #dump_array(extrema, "points_%s" % os.path.basename(vidname))
+    return extrema, fps
+
+def get_extrema(hashes, min_dist, fps):
+    """Take the list of brightness values per frame and compute 
+    a list of pairs (frame number and local maximum)"""
+    
+    order = int(min_dist * fps)
+    idx = argrelmax(np.array(hashes), order=order)[0]
+    result = []
+    old_idx = 0
+    for i in idx:
+        result.append((int(i), (i - old_idx)/fps))
+        old_idx = i
+    return result
+
+def get_points():
+    with get_db() as db_conn:
+        c = db_conn.cursor()
+        c.execute("select rowid from filenames order by rowid asc")
+        file_ids = { i[0] : dict() for i in c}
+        for i in tqdm(file_ids):
+            c.execute("select hash from hashes where filename_id = ? order by frame", [i])
+            file_ids[i]["points"] = [p[0] for p in c]
+        c.close()
+    return file_ids
+
+def check_dups(points, idx, radius):
+    known_duplicates = set()
+    result = []
+    data_length, index_length = idx_get_length(idx)
+    for i in tqdm(range(0, data_length, index_length)):
+        elem_idx = idx_get_nn(idx, i, radius)
+        if len(elem_idx) > 1 and elem_idx[0] < elem_idx[1]:
+            files = []
+            details = []
+            for n, item in enumerate(elem_idx):
+                fn, frame, fps = get_frame(points, item)
+                if fn not in files:
+                    files.append(fn)
+                details.append([fn, frame/fps])
+            files.sort()
+            files = tuple(files)
+            if files not in known_duplicates:
+                known_duplicates.add(tuple(files))
+                if not is_whitelisted([fd[0] for fd in details]):
+                    result.append(details)
+    return result
+
+# flann support, c.f. https://github.com/dougalsutherland/cyflann
+
+def mk_idx_flann(points, index_length, scene_seconds):
+    logging.info("Start building flann index")
+    r = []
+    for data in points.values():
+        hashes = data["points"]
+        data["range"] = (len(r), len(hashes) - index_length)
+        for i in range(len(hashes) - index_length):
+            idata = hashes[i : i + index_length]
+            total = 0
+            for n, v in enumerate(idata):
+                total += v
+                if total > scene_seconds:
+                    idata[n] = 0.0
+            r.append(idata)
+
+    idx = cyflann.FLANNIndex(algorithm="kdtree")
+    idx.build_index(r)
+    return idx
+
+def idx_get_length_flann(idx):
+    return len(idx.data), len(idx.data[0])
+
+def idx_get_nn_flann(idx, rownum, radius):
+    row = idx.data[rownum]
+    elem_idx, _ = idx.nn_radius(row, radius, sorted=True)
+    return elem_idx
+
+# annoy support, c.f. https://github.com/spotify/annoy
+
+def mk_idx_annoy(points, index_length, scene_seconds):
+    logging.info("Start building annoy index")
+    idx = annoy.AnnoyIndex(index_length, metric="euclidean")
+    item = 0
+    for data in points.values():
+        hashes = data["points"]
+        data["range"] = (item, len(hashes) - index_length)
+        for i in range(len(hashes) - index_length):
+            idata = hashes[i : i + index_length]
+            total = 0
+            for n, v in enumerate(idata):
+                total += v
+                if total > scene_seconds:
+                    idata[n] = 0.0
+            idx.add_item(item, idata)
+            item += 1
+
+    idx.build(20)
+    return idx
+
+def idx_get_length_annoy(idx):
+    return idx.get_n_items(), len(idx.get_item_vector(0))
+
+def idx_get_nn_annoy(idx, rownum, radius):
+    result = []
+    count=20
+    elem_idx, elem_dists = idx.get_nns_by_item(rownum, count, include_distances=True)
+    for n, item in enumerate(elem_idx):
+        if elem_dists[n] < radius:
+            result.append(item)
+    return result
+
+# hnswlib support, c.f. https://github.com/nmslib/hnsw
+
+def mk_idx_hnswlib(points, index_length, scene_seconds):
+    logging.info("Start building hnswlib index")
+    idx = hnswlib.Index(space='l2', dim=index_length)
+    idx.set_num_threads(4)
+    # coumpute number of elements
+    items = []
+    item = 0
+    for data in points.values():
+        hashes = data["points"]
+        data["range"] = (item, len(hashes) - index_length)
+        for i in range(len(hashes) - index_length):
+            idata = hashes[i : i + index_length]
+            total = 0
+            for n, v in enumerate(idata):
+                total += v
+                if total > scene_seconds:
+                    idata[n] = 0.0
+            items.append(idata)
+            item += 1
+    idx.init_index(max_elements=item, ef_construction=100, M=index_length)
+    idx.add_items(np.array(items))
+
+    class IDX:
+        pass
+    idx_wrapped = IDX()
+    idx_wrapped.idx = idx
+    idx_wrapped.length = item
+    idx_wrapped.dim = index_length
+    idx_wrapped.items = items
+
+    return idx_wrapped
+
+def idx_get_length_hnswlib(idx):
+    return idx.length, idx.dim
+
+def idx_get_nn_hnswlib(idx, rownum, radius):
+    result = []
+    elem_idx, elem_dists = idx.idx.knn_query(idx.items[rownum], k=20)
+    #print(elem_idx)
+    #print(elem_dists)
+    for n, item in enumerate(elem_idx[0]):
+        if elem_dists[0][n] < radius:
+            result.append(item)
+    return result
+    
+    
+
+def get_frame(points, pos):
+    for fid, points in points.items():
+        start, length = points["range"]
+        if pos >= start and pos < start + length:
+            with get_db() as db_conn:
+                c = db_conn.cursor()
+                c.execute("select name, fps from filenames where rowid = ?", [fid])
+                filename, fps = c.fetchone()
+                c.execute("select frame from hashes where filename_id = ? order by frame limit 1 offset ?", [fid, int(pos - start)])
+                frame = c.fetchone()[0]
+                c.close()
+            return (filename, frame, fps)
+
+def get_fps(fname):
+    video = imageio.get_reader(fname, "ffmpeg")
+    md = video.get_meta_data()
+    return md["fps"]
+
+def is_whitelisted(fnames):
+    """Return True, if all pairs of filenames are whitelisted"""
+    try:
+        ids = get_ids(fnames)
+        with get_db() as db_conn:
+            c = db_conn.cursor()
+            for id1, id2 in combinations(ids, 2):
+                c.execute("select 1 from whitelist where id1 = ? and id2 = ?", (id1, id2))
+                if c.fetchone() is None:
+                    return False
+            c.close()
+            return True
+    except Exception as e:
+        logging.warning(e)
+        return False
+
+
+
+def make_schema():
+    """Create the database schema if it does not exist already"""
+    
+    with get_db() as db_conn:
+        db_conn.execute("create table if not exists filenames (id INTEGER PRIMARY KEY, name text, fps float)").close()
+        db_conn.execute("create unique index if not exists name_ux on filenames (name)").close()
+        db_conn.execute("create table if not exists hashes (filename_id int64, frame int, hash float)").close()
+        db_conn.execute("create table if not exists whitelist (id1 INTEGER, id2 INTEGER)").close()
+        db_conn.execute("create unique index if not exists whitelist_ux on whitelist (id1, id2)").close()
+        db_conn.execute("create index if not exists filename_id_idx on hashes (filename_id)").close()
+
+def import_file(fname):
+    """Compute and import hashes of the given filename into the database"""
+    start_time = time.time()
+    with get_db() as db_conn:
+        try:
+            c = db_conn.cursor()
+            c.execute("select 1 from filenames where name = ?", [fname])
+            if c.fetchall():
+                logging.info("File %s already imported", fname)        
+                return
+            hashes, fps = get_hashes(fname)
+
+            c.execute("insert into filenames values (null, ?, ?)", [fname, fps])
+            rowid = c.lastrowid
+
+            for frame, h in hashes:
+                c.execute("insert into hashes values (?, ?, ?)", [ rowid, frame, h ])
+            c.close()
+            db_conn.commit()
+            logging.info("File %s imported in %s", fname, format_duration(time.time() - start_time))
+        except KeyboardInterrupt:
+            logging.warning("Aborted")
+            raise
+        except:
+            logging.warning("Failed to insert hashes for %s", fname, exc_info=True)
+        db_conn.rollback()
+
+def tidy_db(delete):
+
+    with get_db() as db_conn:
+        c = db_conn.cursor()
+        c.execute("select distinct filename_id from hashes where filename_id not in (select rowid from filenames)")
+        for fid, in c:
+            db_conn.execute("delete from hashes where filename_id = ?", (fid,))
+        
+    with get_db() as db_conn:
+        del_files = []
+        file_count = 0
+        c = db_conn.cursor()
+        c.execute("select name, rowid from filenames")
+        for fn, rowid in c:
+            file_count += 1
+            if not os.access(fn, os.R_OK):
+                del_files.append((rowid, fn))
+        c.close()
+        
+    if delete:
+        with get_db() as db_conn:
+            c = db_conn.cursor()
+            for rowid, _ in del_files:
+                c.execute("delete from hashes where filename_id = ?", (rowid,))
+                c.execute("delete from filenames where rowid = ?", (rowid,))
+                c.execute("delete from whitelist where id1 = ? or id2 = ?", (rowid, rowid))
+            c.close()
+    else:
+        logging.warning("Need to delete %d of %d files", len(del_files), file_count)
+        for _, fn in del_files:
+            logging.info(fn)
+
+def get_ids(files):
+    ids = []
+    with get_db() as db_conn:
+        c = db_conn.cursor()
+        for f in files:
+            try:
+                c.execute("select id from filenames where name = ?", (f,))
+                ids.append(c.fetchone()[0])
+            except:
+                raise Exception("File '%s' not known" % f)
+        c.close()
+    ids.sort()
+    return ids
+
+def whitelist(files):
+    if len(files) < 2:
+        logging.warning("Need at least two files to whitelist")
+        return
+
+    try:
+        ids = get_ids(files)
+    except Exception as e:
+        logging.warning(e)
+        return
+    
+    with get_db() as db_conn:
+        c = db_conn.cursor()
+        for id1, id2 in combinations(ids,2):
+            try:
+                c.execute("insert into whitelist values (?,?)", (id1, id2))
+                db_conn.commit()
+            except:
+                pass
+        c.close()
+
+def fix_fps():
+    with get_db() as db_conn:
+        c = db_conn.cursor()
+        c.execute("select name, fps, rowid from filenames")
+        updates = []
+        for fn, fps, rowid in c:
+            if fps:
+                continue
+            updates.append((rowid, get_fps(fn)))
+        for rowid, fps in updates:
+            c.execute("update filenames set fps=? where rowid = ?", [fps, rowid])
+        db_conn.commit()
+
+def format_duration(seconds):
+    return time.strftime("%H:%M:%S", time.gmtime(seconds))
+        
+
+
+class VidDupUI(object):
+
+    def __init__(self, duplicates):
+        self.duplicates = duplicates
+
+    def start(self):
+        self.builder = Gtk.Builder()
+        self.builder.add_from_file("viddup.glade")
+        
+        window = self.builder.get_object("app")
+
+        data_grid = Gtk.Grid()
+        data_grid.insert_column(0)
+        data_grid.insert_column(0)
+        data_grid.insert_column(0)
+        rows = 0
+        for index, group in enumerate(self.duplicates):
+            for row in group:
+                filename, offset = row
+                fn = Gtk.Label(label=filename, xalign=0, xpad=10)
+                row.append(fn)
+                offset = Gtk.Label(label=format_duration(offset), xalign=0, xpad=10)
+                delete = Gtk.Button(label="delete")
+                delete.connect("clicked", self.onDelete, filename)
+                data_grid.insert_row(rows)
+                data_grid.attach(fn, 0, rows, 1, 1)
+                data_grid.attach(offset, 1, rows, 1, 1)
+                data_grid.attach(delete, 2, rows, 1, 1)
+                rows += 1
+            box = Gtk.Box(orientation="horizontal")
+            play = Gtk.Button(label="play")
+            play.connect("clicked", self.onPlay, index)
+            box.pack_start(play, expand=False, fill=True, padding=0)
+            whitelist = Gtk.Button(label="whitelist")
+            whitelist.connect("clicked", self.onWhitelist, index)
+            box.pack_start(whitelist, expand=False, fill=True, padding=0)
+            box.pack_end(Gtk.Label(), expand=True, fill=True, padding=0)
+            data_grid.insert_row(rows)
+            data_grid.attach(box, 0, rows, 3, 1)
+            rows += 1
+            
+        main_area = self.builder.get_object("main_area")
+        main_area.add(data_grid)
+
+        self.builder.connect_signals(self)
+        
+        window.show_all()
+        
+        Gtk.main()
+
+    def onPlay(self, *args):
+        index = args[1]
+        procs = []
+        for vids in self.duplicates[index]:
+            if os.access(vids[0], os.R_OK):
+                procs.append(subprocess.Popen(["ffplay", "-sn", "-ss", format_duration(vids[1]), vids[0]],
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+
+        finished = False
+        while not finished:
+            for p in procs:
+                if (0,0) != os.waitpid(p.pid, os.WNOHANG):
+                    finished = True
+                    break
+            time.sleep(0.2)
+            
+        for p in procs:
+            try:
+                p.kill()
+            except: pass
+
+    def onWhitelist(self, *args):
+        args[0].destroy()
+        index = args[1]
+        fnames = [d[0] for d in self.duplicates[index]]
+        logging.info("Whitelisting %s", fnames)
+        whitelist(fnames)
+
+    def onDelete(self, *args):
+        fname = args[1]
+        try:
+            os.remove(fname)
+            logging.info("Deleted %s", fname)
+            for group in self.duplicates:
+                for fn,_,label in group:
+                    if fn == fname:
+                        label.set_markup("<span strikethrough='true'>%s</span>" % GObject.markup_escape_text(fn))
+                        label.set_use_markup(True)
+        except Exception as e:
+            logging.error("Failed to delete %s: %s", fname, e)
+        
+    def onQuit(self, *args):
+        Gtk.main_quit(*args)
+
+    def onPurge(self, *args):
+        switch = self.builder.get_object("delete_switch")
+        tidy_db(switch.get_active())
+
+def handle_import(args):
+    for fname in get_files(args.dir):
+        import_file(fname)
+
+def handle_search(args):
+    logging.info("Loading hashes")
+    points = get_points( )
+    idx = mk_idx(points, args.indexlength, args.scenelength)
+    logging.info("Searching duplicates")
+    duplicates = check_dups(points, idx, radius=args.radius)
+
+    if args.ui:
+        ui = VidDupUI(duplicates)
+        ui.start()
+    else:
+        for match in duplicates:
+            logging.info("Group of %d files found", len(match))
+            for m in match:
+                logging.info("ffplay -ss %s '%s'", format_duration(m[1]), m[0])
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--purge", default=False, action="store_true", help="Purge deleted files from database (dry run mode)")
+    parser.add_argument("--delete", default=False, action="store_true", help="Really delete from database in purge")
+    parser.add_argument("--dir", help="Import video hashes from directory and its subdirectories")
+    parser.add_argument("--search", action="store_true", help="Search duplicates in database")
+    parser.add_argument("--db", help="Database file", default=DB_URI_DEFAULT)
+    parser.add_argument("--indexlength", default=10, type=int, help="Length of index in searches, smaller values will produce more false positives, default 10")
+    parser.add_argument("--scenelength", default=300, type=int, help="Length in seconds of scenes to match, default 300")
+    parser.add_argument("--radius", default=3.0, type=float, help="Measure for acceptable index difference. Higher values will result in more false positives, default 3.0")
+    parser.add_argument("--ui", action="store_true", help="Launch ui after search")
+    parser.add_argument("--whitelist", nargs='+', help="Whitelist a list of files")
+    parser.add_argument("--knnlib", default=ANN_LIBS[0], help="knn library to use, choose " + ", ".join(ANN_LIBS))
+
+    params = parser.parse_args()
+
+    DB_URI=params.db
+
+    make_schema()
+
+    if params.knnlib not in ANN_LIBS:
+        logging.error("Unsupported knn library %s", params.knnlib)
+        sys.exit(1)
+
+    idx_get_nn = globals()["idx_get_nn_%s" % params.knnlib]
+    idx_get_length = globals()["idx_get_length_%s" % params.knnlib]
+    mk_idx = globals()["mk_idx_%s" % params.knnlib]
+    logging.info("Using knn library %s", params.knnlib)
+        
+    if params.whitelist:
+        whitelist(params.whitelist)
+    
+    if params.purge:
+        tidy_db(params.delete)
+
+    if params.dir:
+        handle_import(params)
+
+    if params.search:
+        handle_search(params)
+
+    
