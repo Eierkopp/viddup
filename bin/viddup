@@ -30,7 +30,7 @@ from collections import namedtuple
 logging.basicConfig(level=logging.INFO)
 
 DB_URI_DEFAULT = "viddup.sqlite3"
-KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts"
+KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts, asf"
 INDEX_DIST = 10 # seconds
 ANN_LIBS = []
 
@@ -89,11 +89,14 @@ class Index:
                     continue
                 
                 for n, item in enumerate(elem_idx):
-                    start_item, fid = self.get_fid_by_item(item)
-                    fileinfo, frame = self.get_frame(fid, item - start_item)
-                    if debug:
-                        logging.info("%-50s: %s", fn[-50:], self.idx_get_row(item))
-                    details.append([fileinfo, frame/fileinfo.fps])
+                    try:
+                        start_item, fid = self.get_fid_by_item(item)
+                        fileinfo, frame = self.get_frame(fid, item - start_item)
+                        if debug:
+                            logging.info("%-50s: %s", fn[-50:], self.idx_get_row(item))
+                        details.append([fileinfo, frame/fileinfo.fps])
+                    except:
+                        logging.info("Error processing: %s, purge required?", item)
                 known_duplicates.add(fids)    
                 result.append(details)
         return result
