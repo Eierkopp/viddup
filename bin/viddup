@@ -7,7 +7,6 @@ import importlib
 import logging
 import os
 from pprint import pprint
-from random import randint
 import sqlite3 as db
 import subprocess
 import time
@@ -27,7 +26,20 @@ import pstats
 import multiprocessing
 from collections import namedtuple
 
-logging.basicConfig(level=logging.INFO)
+class TqdmStream:
+
+    def __init__(self, stream):
+        self.stream = stream
+    
+    def write(self, data):
+        data = data.rstrip("\r\n")
+        if data:
+            tqdm.write(data, file=self.stream)
+            self.stream.flush()
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)-15s;%(levelname)s;%(message)s',
+                    stream=TqdmStream(sys.stdout))
 
 DB_URI_DEFAULT = "viddup.sqlite3"
 KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts, asf"
@@ -42,7 +54,7 @@ for module_name in [ "hnswlib", "cyflann", "annoy" ]:
         pass
 
 if not ANN_LIBS:
-    logging.error("Please install one of the k-nearest neighbor libraries: hnswlib, cyflann, or annoy")
+    logging.error("Please install at least one of the k-nearest neighbor libraries: hnswlib, cyflann, or annoy")
     sys.exit(1)
 
 FileInfo = namedtuple("FileInfo", "fid, name, fps, duration")
@@ -73,31 +85,37 @@ class Index:
         
         for i in tqdm(range(0, data_length, step)):
             elem_idx = self.idx_get_nn(i, radius)
-            if len(elem_idx) > 1 and elem_idx[0] < elem_idx[1]:
+            elem_idx.sort()
+            if len(elem_idx) > 1:
                 details = []
 
-                fids = tuple(self.get_fids_by_items(elem_idx))
-                if debug:
-                    logging.info("Debugging match of size %d: %s", len(elem_idx), fids)
+                fids = list(set(self.get_fids_by_items(elem_idx)))
+                fids.sort()
+                pairs = list(combinations(fids, 2))
 
-                if fids in known_duplicates:
+                for pair in pairs[:]:
+                    if pair in known_duplicates or is_whitelisted(pair):
+                        pairs.remove(pair)
+                fids = set(i[0] for i in pairs).union(i[1] for i in pairs)
+
+                if not fids:
                     continue
                 
-                if is_whitelisted(fids):
-                    #logging.info("File set is whitelisted: %s", fids)
-                    known_duplicates.add(fids)
-                    continue
-                
+                known_duplicates.update(set(pairs))
+
+                known_fids = set()
                 for n, item in enumerate(elem_idx):
                     try:
                         start_item, fid = self.get_fid_by_item(item)
+                        if fid not in fids or fid in known_fids:
+                            continue
+                        known_fids.add(fid)
                         fileinfo, frame = self.get_frame(fid, item - start_item)
                         if debug:
-                            logging.info("%-50s: %s", fn[-50:], self.idx_get_row(item))
+                            logging.info("%4d, %-50s: %s", fileinfo.fid, fileinfo.name[-50:], self.idx_get_row(item))
                         details.append([fileinfo, frame/fileinfo.fps])
                     except:
-                        logging.info("Error processing: %s, purge required?", item)
-                known_duplicates.add(fids)    
+                        logging.info("Error processing: %s, purge required?", item, exc_info=True)
                 result.append(details)
         return result
         
@@ -112,18 +130,16 @@ class Index:
         items = []
         for fileinfo in self.get_file_infos():
             hashes = self.get_hashes(fileinfo.fid)
-            item_count = max(1, len(hashes) - index_length)
+            item_count = max(0, len(hashes) - index_length)
             self.fid_list.append(fileinfo.fid)
             self.item_list.append(item_num)
             for i in range(item_count):
                 item = hashes[i:i+index_length]
-                if len(item) < index_length:
-                    item += [0.0] * (index_length - len(item))
                 total_time = 0
                 for n, v in enumerate(item):
-                    total_time += v
                     if total_time > scene_seconds:
                         item[n] = 0.0
+                    total_time += v
                 items.append(item)
             item_num += item_count
         self.mk_index(items)
@@ -185,7 +201,7 @@ class Index:
         return result
 
     def idx_get_row_annoy(self, rownum):
-        return idx.get_item_vector(rownum)
+        return self.idx.get_item_vector(rownum)
     
     # flann support, c.f. https://github.com/dougalsutherland/cyflann
     def mk_idx_cyflann(self, items):
@@ -257,7 +273,7 @@ def get_hashes(vidname):
     except imageio.core.format.CannotReadFrameError:
         pass
     except Exception as e:
-        logging.warning("Error processing video: %s", e)
+        logging.warning("Error processing video: %s", e, exc_info=True)
 
     extrema = get_extrema(brightness, INDEX_DIST, fps)
     return extrema, fps, duration
@@ -354,7 +370,8 @@ def tidy_db(delete):
     if delete:
         with get_db() as db_conn:
             c = db_conn.cursor()
-            c.execute("delete from filenames where not exists (select 1 from hashes where filename_id = id)");
+            c.execute("delete from filenames where not exists (select 1 from hashes where filename_id = id)")
+            c.execute("delete from hashes where filename_id not in (select id from filenames)")
             for rowid, _ in del_files:
                 c.execute("delete from hashes where filename_id = ?", (rowid,))
                 c.execute("delete from filenames where rowid = ?", (rowid,))
@@ -390,18 +407,21 @@ def whitelist(files):
     except Exception as e:
         logging.warning(e)
         return
-    
+
+    retval = []
     with get_db() as db_conn:
         c = db_conn.cursor()
         for id1, id2 in combinations(ids,2):
             try:
                 if id1 > id2:
                     id1, id2 = id2, id1
+                retval.append((id1, id2))
                 c.execute("insert into whitelist values (?,?)", (id1, id2))
                 db_conn.commit()
             except:
                 db_conn.rollback()
         c.close()
+    return retval
 
 def format_duration(seconds):
     return time.strftime("%H:%M:%S", time.gmtime(seconds))
@@ -482,7 +502,7 @@ class VidDupUI(object):
         index = args[1]
         fnames = [d[0].name for d in self.duplicates[index]]
         logging.info("Whitelisting %s", fnames)
-        whitelist(fnames)
+        pairs = whitelist(fnames)
 
     def onDelete(self, *args):
         fname = args[1]
