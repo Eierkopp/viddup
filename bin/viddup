@@ -89,8 +89,9 @@ class Index:
             if len(elem_idx) > 1:
                 details = []
 
-                fids = list(set(self.get_fids_by_items(elem_idx)))
+                fids = [self.fi_list[i].fid for i in elem_idx]
                 fids.sort()
+
                 pairs = list(combinations(fids, 2))
 
                 for pair in pairs[:]:
@@ -106,11 +107,11 @@ class Index:
                 known_fids = set()
                 for n, item in enumerate(elem_idx):
                     try:
-                        start_item, fid = self.get_fid_by_item(item)
+                        fid = self.fi_list[item].fid
                         if fid not in fids or fid in known_fids:
                             continue
                         known_fids.add(fid)
-                        fileinfo, frame = self.get_frame(fid, item - start_item)
+                        fileinfo, frame = self.fi_list[item], self.frame_list[item]
                         if debug:
                             logging.info("%4d, %-50s: %s", fileinfo.fid, fileinfo.name[-50:], self.idx_get_row(item))
                         details.append([fileinfo, frame/fileinfo.fps])
@@ -122,17 +123,25 @@ class Index:
 
     def init_index(self):
         logging.info("Loading hashes")
-        self.fid_list = []
-        self.item_list = []
-        item_num = 0
+        self.fi_list = []    # fileinfo for item
+        self.frame_list = []  # first frame for item
+        items = []
+
         index_length = self.params.indexlength
         scene_seconds = self.params.scenelength
-        items = []
+        ignore_start = self.params.ignore_start
+        ignore_end = self.params.ignore_end
+                
         for fileinfo in self.get_file_infos():
-            hashes = self.get_hashes(fileinfo.fid)
+            min_frame = int(ignore_start * fileinfo.fps)
+            max_frame = int((fileinfo.duration - ignore_end) * fileinfo.fps)
+            
+            frames, hashes = self.get_hashes(fileinfo.fid, min_frame, max_frame)
+            if len(hashes) < 5: # ignore fid, if list of hashes is too short
+                continue
+            
             item_count = max(0, len(hashes) - index_length)
-            self.fid_list.append(fileinfo.fid)
-            self.item_list.append(item_num)
+
             for i in range(item_count):
                 item = hashes[i:i+index_length]
                 total_time = 0
@@ -141,18 +150,11 @@ class Index:
                         item[n] = 0.0
                     total_time += v
                 items.append(item)
-            item_num += item_count
+                self.fi_list.append(fileinfo)
+                self.frame_list.append(frames[i])
+
         self.mk_index(items)
                         
-    def get_fid_by_item(self, item):
-        pos = max(0, bisect.bisect_right(self.item_list, item) - 1)
-        return self.item_list[pos], self.fid_list[pos]
-
-    def get_fids_by_items(self, items):
-        r = [ self.get_fid_by_item(item)[1] for item in items ]
-        r.sort()
-        return r
-
     def get_file_infos(self):
         with get_db() as db_conn:
             c = db_conn.cursor()
@@ -161,24 +163,15 @@ class Index:
                 yield FileInfo._make(i)
             c.close()
 
-    def get_frame(self, fid, pos):
+    def get_hashes(self, fid, min_frame, max_frame):
         with get_db() as db_conn:
             c = db_conn.cursor()
-            c.execute("select id, name, fps, duration from filenames where id = ?", [fid])
-            fileinfo = FileInfo._make(c.fetchone())
-            c.execute("select frame from hashes where filename_id = ? order by frame limit 1 offset ?", [fid, int(pos)])
-            frame = c.fetchone()[0]
+            c.execute("select frame, hash from hashes where filename_id = ? and frame >= ? and frame <= ? order by frame", [fid, min_frame, max_frame])
+            result = c.fetchall()
             c.close()
-
-        return (fileinfo, frame)
-
-    def get_hashes(self, fid):
-        with get_db() as db_conn:
-            c = db_conn.cursor()
-            c.execute("select hash from hashes where filename_id = ? order by frame", [fid])
-            hashes = [p[0] for p in c]
-            c.close()
-            return hashes
+            hashes = [p[1] for p in result]
+            frames = [p[0] for p in result]
+            return frames, hashes
             
     # annoy support, c.f. https://github.com/spotify/annoy
     def mk_idx_annoy(self, items):
@@ -569,6 +562,8 @@ if __name__ == "__main__":
     parser.add_argument("--delete", default=False, action="store_true", help="Really delete from database in purge")
     parser.add_argument("--dir", help="Import video hashes from directory and its subdirectories")
     parser.add_argument("--search", action="store_true", help="Search duplicates in database")
+    parser.add_argument("--ignore_start", type=int, default=0, help="Ignore search results startin in the first seconds of a movie, default 0")
+    parser.add_argument("--ignore_end", type=int, default=0, help="Ignore search results startingstartin in the last seconds of a movie, default 0")
     parser.add_argument("--db", help="Database file", default=DB_URI_DEFAULT)
     parser.add_argument("--indexlength", default=10, type=int, help="Length of index in searches, smaller values will produce more false positives, default 10")
     parser.add_argument("--scenelength", default=300, type=int, help="Length in seconds of scenes to match, default 300")
