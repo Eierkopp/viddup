@@ -117,7 +117,8 @@ class Index:
                         details.append([fileinfo, frame/fileinfo.fps])
                     except:
                         logging.info("Error processing: %s, purge required?", item, exc_info=True)
-                result.append(details)
+                if len(details) > 1:
+                    result.append(details)
         return result
         
 
@@ -247,7 +248,7 @@ def get_files(basedir, vid_ext):
         for f in files:
             _, ext = os.path.splitext(f)
             if ext.lower().lstrip(".") in vid_ext:
-                yield os.path.join(root, f)
+                yield os.path.abspath(os.path.join(root, f))
 
 def get_hashes(vidname):
     video = imageio.get_reader(vidname, "vidhash")
@@ -555,6 +556,24 @@ def fixfileinfo(params):
             db_conn.commit()
         c.close()
 
+def fixfilenames(params):
+    with get_db() as db_conn:
+        c = db_conn.cursor()
+        c.execute("select id, name from filenames order by id asc")
+        for i in c.fetchall():
+            id, name = i
+            if name.startswith(os.path.sep):
+                continue
+            logging.info("fixing filename %s", name)
+            if os.access(name, os.R_OK):
+                absname = os.path.abspath(name)
+                logging.info("abspath %s", absname)
+                c.execute("update filenames set name=? where id=?", [absname, id])
+            db_conn.commit()
+        c.close()
+
+
+        
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -574,6 +593,7 @@ if __name__ == "__main__":
     parser.add_argument("--knnlib", default=ANN_LIBS[0], help="knn library to use, choose " + ", ".join(ANN_LIBS))
     parser.add_argument("--vidext", default=KNOWN_VID_TYPES_DEFAULT, help="filename extensions to consider, default %s" % KNOWN_VID_TYPES_DEFAULT)
     parser.add_argument("--fixfileinfo", default=False, action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--fixfilenames", default=False, action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--debug", default=False, action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--profile", default=False, action="store_true", help=argparse.SUPPRESS)
 
@@ -593,7 +613,10 @@ if __name__ == "__main__":
 
     if params.fixfileinfo:
         fixfileinfo(params)
-    
+
+    if params.fixfilenames:
+        fixfilenames(params)
+
     if params.whitelist:
         whitelist(params.whitelist)
     
