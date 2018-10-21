@@ -37,9 +37,18 @@ class TqdmStream:
             tqdm.write(data, file=self.stream)
             self.stream.flush()
 
+log_stream = TqdmStream(sys.stdout)
+
+import warnings
+def warn_msg_impl(msg):
+    text = warnings._formatwarnmsg(msg)
+    log_stream.write(text)
+
+warnings._showwarnmsg_impl = warn_msg_impl
+
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)-15s;%(levelname)s;%(message)s',
-                    stream=TqdmStream(sys.stdout))
+                    stream=log_stream)
 
 DB_URI_DEFAULT = "viddup.sqlite3"
 KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts, asf"
@@ -260,8 +269,9 @@ def get_hashes(vidname):
     
     brightness = []
     try:
-        for frame in tqdm(video.iter_data(), total=nframes, leave=False):
-            brightness.append(frame.mean())
+        with tqdm(video.iter_data(), total=nframes, leave=False) as progress_bar:
+            for frame in progress_bar:
+                brightness.append(frame.mean())
     except KeyboardInterrupt:
         raise
     except imageio.core.format.CannotReadFrameError:
@@ -563,23 +573,32 @@ def fixfileinfo(params):
             db_conn.commit()
         c.close()
 
-def fixfilenames(params):
-    with get_db() as db_conn:
-        c = db_conn.cursor()
-        c.execute("select id, name from filenames order by id asc")
-        for i in c.fetchall():
-            id, name = i
-            if name.startswith(os.path.sep):
-                continue
-            logging.info("fixing filename %s", name)
-            if os.access(name, os.R_OK):
-                absname = os.path.abspath(name)
-                logging.info("abspath %s", absname)
-                c.execute("update filenames set name=? where id=?", [absname, id])
-            db_conn.commit()
-        c.close()
+# def fixfilenames(params):
+#     with get_db() as db_conn:
+#         c = db_conn.cursor()
+#         c.execute("select id, name from filenames order by id asc")
+#         for i in c.fetchall():
+#             id, name = i
+#             if name.startswith(os.path.sep):
+#                 continue
+#             logging.info("fixing filename %s", name)
+#             if os.access(name, os.R_OK):
+#                 absname = os.path.abspath(name)
+#                 logging.info("abspath %s", absname)
+#                 c.execute("update filenames set name=? where id=?", [absname, id])
+#             db_conn.commit()
+#         c.close()
 
-
+def fixfilenames(args):
+    for fname in get_files(args.dir, args.vidext.replace(" ","").split(",")):
+        try:
+            fname.encode("utf8")
+        except:
+            logging.warn("invalid filename %s", fname, exc_info=True)
+            fn = fname.encode("utf8", "ignore")
+            new_fname = fn.decode("utf8")
+            logging.info("changed into %s", new_fname)
+            os.rename(fname, new_fname)
         
 if __name__ == "__main__":
 
@@ -622,7 +641,10 @@ if __name__ == "__main__":
         fixfileinfo(params)
 
     if params.fixfilenames:
-        fixfilenames(params)
+        if params.dir:
+            fixfilenames(params)
+        else:
+            logging.error("please set --dir option as well")
 
     if params.whitelist:
         whitelist(params.whitelist)
