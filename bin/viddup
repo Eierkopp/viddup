@@ -7,7 +7,6 @@ import importlib
 import logging
 import os
 from pprint import pprint
-import sqlite3 as db
 import subprocess
 import time
 import types
@@ -25,6 +24,8 @@ import cProfile
 import pstats
 import multiprocessing
 from collections import namedtuple
+
+from viddup import FileInfo, get_db
 
 class TqdmStream:
 
@@ -50,7 +51,6 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)-15s;%(levelname)s;%(message)s',
                     stream=log_stream)
 
-DB_URI_DEFAULT = "viddup.sqlite3"
 KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts, asf"
 INDEX_DIST = 10 # seconds
 ANN_LIBS = []
@@ -66,12 +66,11 @@ if not ANN_LIBS:
     logging.error("Please install at least one of the k-nearest neighbor libraries: hnswlib, cyflann, or annoy")
     sys.exit(1)
 
-FileInfo = namedtuple("FileInfo", "fid, name, fps, duration")
-    
 class Index:
 
-    def __init__(self, params):
+    def __init__(self, dbi, params):
         logging.info("Using knn library %s", params.knnlib)
+        self.dbi = dbi
         self.params = params
         self.knn_module = importlib.import_module(params.knnlib)
 
@@ -104,7 +103,7 @@ class Index:
                 pairs = list(combinations(fids, 2))
 
                 for pair in pairs[:]:
-                    if pair in known_duplicates or is_whitelisted(pair):
+                    if pair in known_duplicates or self.is_whitelisted(pair):
                         pairs.remove(pair)
                 fids = set(i[0] for i in pairs).union(i[1] for i in pairs)
 
@@ -129,7 +128,13 @@ class Index:
                 if len(details) > 1:
                     result.append(details)
         return result
-        
+
+    def is_whitelisted(self, ids):
+        """Return True, if all pairs of filenames are whitelisted"""
+        for id1, id2 in combinations(ids, 2):
+            if not dbi.is_whitelisted(id1, id2):
+                return False
+        return True
 
     def init_index(self):
         logging.info("Loading hashes")
@@ -141,48 +146,31 @@ class Index:
         scene_seconds = self.params.scenelength
         ignore_start = self.params.ignore_start
         ignore_end = self.params.ignore_end
-                
-        for fileinfo in self.get_file_infos():
-            min_frame = int(ignore_start * fileinfo.fps)
-            max_frame = int((fileinfo.duration - ignore_end) * fileinfo.fps)
-            
-            frames, hashes = self.get_hashes(fileinfo.fid, min_frame, max_frame)
-            if len(hashes) < 5: # ignore fid, if list of hashes is too short
-                continue
-            
-            item_count = max(0, len(hashes) - index_length)
 
-            for i in range(item_count):
-                item = hashes[i:i+index_length]
-                total_time = 0
-                for n, v in enumerate(item):
-                    if total_time > scene_seconds:
-                        item[n] = 0.0
-                    total_time += v
-                items.append(item)
-                self.fi_list.append(fileinfo)
-                self.frame_list.append(frames[i])
+        with tqdm(self.dbi.get_file_infos()) as progress_bar:
+            for fileinfo in progress_bar:
+                min_frame = int(ignore_start * fileinfo.fps)
+                max_frame = int((fileinfo.duration - ignore_end) * fileinfo.fps)
+
+                frames, hashes = dbi.get_hashes(fileinfo.fid, min_frame, max_frame)
+                if len(hashes) < 5: # ignore fid, if list of hashes is too short
+                    continue
+
+                item_count = max(0, len(hashes) - index_length)
+
+                for i in range(item_count):
+                    item = hashes[i:i+index_length]
+                    total_time = 0
+                    for n, v in enumerate(item):
+                        if total_time > scene_seconds:
+                            item[n] = 0.0
+                        total_time += v
+                    items.append(item)
+                    self.fi_list.append(fileinfo)
+                    self.frame_list.append(frames[i])
 
         self.mk_index(items)
-                        
-    def get_file_infos(self):
-        with get_db() as db_conn:
-            c = db_conn.cursor()
-            c.execute("select rowid, name, fps, duration from filenames order by rowid asc")
-            for i in tqdm(c.fetchall()):
-                yield FileInfo._make(i)
-            c.close()
-
-    def get_hashes(self, fid, min_frame, max_frame):
-        with get_db() as db_conn:
-            c = db_conn.cursor()
-            c.execute("select frame, hash from hashes where filename_id = ? and frame >= ? and frame <= ? order by frame", [fid, min_frame, max_frame])
-            result = c.fetchall()
-            c.close()
-            hashes = [p[1] for p in result]
-            frames = [p[0] for p in result]
-            return frames, hashes
-            
+                              
     # annoy support, c.f. https://github.com/spotify/annoy
     def mk_idx_annoy(self, items):
         logging.info("Start building annoy index")
@@ -247,11 +235,6 @@ class Index:
     def idx_get_row_hnswlib(self, rownum):
         return self.__items[rownum]
 
-def get_db():
-    conn = db.connect(DB_URI)
-    conn.execute("pragma busy_timeout = 300000").close()
-    return conn
-
 def get_files(basedir, vid_ext):
     for root, _, files in os.walk(basedir):
         for f in files:
@@ -295,143 +278,85 @@ def get_extrema(hashes, min_dist, fps):
         old_idx = i
     return result
 
-
-def is_whitelisted(ids):
-    """Return True, if all pairs of filenames are whitelisted"""
-    try:
-        #ids = get_ids(fnames)
-        with get_db() as db_conn:
-            c = db_conn.cursor()
-            for id1, id2 in combinations(ids, 2):
-                if id1 > id2:
-                    id1, id2 = id2, id1
-                c.execute("select 1 from whitelist where id1 = ? and id2 = ?", (id1, id2))
-                if c.fetchone() is None:
-                    return False
-            c.close()
-            return True
-    except Exception as e:
-        logging.warning(e)
-        return False
-
-def make_schema():
-    """Create the database schema if it does not exist already"""
-    
-    with get_db() as db_conn:
-        db_conn.execute("create table if not exists filenames (id INTEGER PRIMARY KEY, name text, fps float, duration float)").close()
-        db_conn.execute("create unique index if not exists name_ux on filenames (name)").close()
-        db_conn.execute("create table if not exists hashes (filename_id int64, frame int, hash float)").close()
-        db_conn.execute("create table if not exists whitelist (id1 INTEGER, id2 INTEGER)").close()
-        db_conn.execute("create table if not exists brightness (filename_id int64, frame INTEGER, brightness float)").close()
-        db_conn.execute("create unique index if not exists whitelist_ux on whitelist (id1, id2)").close()
-        db_conn.execute("create unique index if not exists filename_id_hashes_ux on hashes (filename_id, frame)").close()
-        db_conn.execute("create index if not exists filename_id_brightness_ux on brightness (filename_id, frame)").close()
-
-def import_file(fname):
+def import_file(dbi, params, fname):
     """Compute and import hashes of the given filename into the database"""
     start_time = time.time()
-    with get_db() as db_conn:
-        try:
-            c = db_conn.cursor()
-            c.execute("select 1 from filenames where name = ?", [fname])
-            if c.fetchall():
+    try:
+        if dbi.is_name_in_db(fname):
+            if not params.refresh:
                 logging.info("File %s already imported", fname)        
                 return
-            hashes, fps, duration, brightness = get_hashes(fname)
 
-            c.execute("insert into filenames values (null, ?, ?, ?)", [fname, fps, duration])
-            rowid = c.lastrowid
+        index_info, fps, duration, brightness = get_hashes(fname)
 
-            for frame, h in hashes:
-                c.execute("insert into hashes values (?, ?, ?)", [ rowid, frame, h ])
+        fi = dbi.insert_file(fname, fps, duration)
 
-            for frame, brightness in enumerate(brightness):
-                c.execute("insert into brightness values (?, ?, ?)", [ rowid, frame, brightness ])
-            
-            c.close()
-            db_conn.commit()
-            logging.info("File %s imported in %s", fname, format_duration(time.time() - start_time))
-        except KeyboardInterrupt:
-            logging.warning("Aborted")
-            raise
-        except:
-            logging.warning("Failed to insert hashes for %s", fname, exc_info=True)
-        finally:
-            db_conn.rollback()
+        dbi.insert_hashes(fi.fid, index_info)
 
-def tidy_db(delete):
-
-    with get_db() as db_conn:
-        c = db_conn.cursor()
-        c.execute("select distinct filename_id from hashes where filename_id not in (select rowid from filenames)")
-        for fid, in c:
-            db_conn.execute("delete from hashes where filename_id = ?", (fid,))
+        dbi.insert_brightness(fi.fid, brightness)
         
-    with get_db() as db_conn:
-        del_files = []
-        file_count = 0
-        c = db_conn.cursor()
-        c.execute("select name, rowid from filenames")
-        for fn, rowid in c:
-            file_count += 1
-            if not os.access(fn, os.R_OK):
-                del_files.append((rowid, fn))
-        c.close()
+        dbi.commit()
+        logging.info("File %s imported in %s", fname, format_duration(time.time() - start_time))
         
-    if delete:
-        with get_db() as db_conn:
-            c = db_conn.cursor()
-            c.execute("delete from filenames where not exists (select 1 from hashes where filename_id = id)")
-            c.execute("delete from hashes where filename_id not in (select id from filenames)")
-            for rowid, _ in del_files:
-                c.execute("delete from hashes where filename_id = ?", (rowid,))
-                c.execute("delete from filenames where rowid = ?", (rowid,))
-                c.execute("delete from whitelist where id1 = ? or id2 = ?", (rowid, rowid))
-                
-            c.close()
+    except KeyboardInterrupt:
+        logging.warning("Aborted")
+        raise
+    except:
+        logging.warning("Failed to insert hashes for %s", fname, exc_info=True)
+    finally:
+        dbi.rollback()
+
+def handle_purge(dbi, params, do_delete=None):
+
+    if do_delete is None:
+        do_delete = params.delete
+
+    del_files = []
+    fn_fis = []
+    for fi in dbi.get_file_infos():
+        fn_fis.append(fi.fid)
+        if not os.access(fi.name, os.R_OK):
+            del_files.append(fi)
+        
+    logging.warning("Need to delete %d of %d files", len(del_files), len(fn_fis))
+    if do_delete:
+        for fi in del_files:
+            logging.info("deleting %s", fi.name)
+            dbi.del_file(fi.fid)
     else:
-        logging.warning("Need to delete %d of %d files", len(del_files), file_count)
-        for _, fn in del_files:
-            logging.info(fn)
+        for fi in del_files:
+            logging.info(fi.name)
+                
 
-def get_ids(files):
-    ids = []
-    with get_db() as db_conn:
-        c = db_conn.cursor()
-        for f in files:
-            try:
-                c.execute("select id from filenames where name = ?", (f,))
-                ids.append(c.fetchone()[0])
-            except:
-                raise Exception("File '%s' not known" % f)
-        c.close()
-    ids.sort()
-    return ids
+def whitelist(dbi, params, files=None):
 
-def whitelist(files):
-    if len(files) < 2:
+    Entry = namedtuple("Entry", "name, fid")
+
+    if files is None:
+        files = params.whitelist
+    
+    ids = set()
+    for f in files:
+        fid = dbi.get_id(f)
+        if fid is not None:
+            ids.add(Entry._make([f,fid]))
+        else:
+            logging.warn("File %s not found in DB", f)
+
+    if len(ids) < 2:
         logging.warning("Need at least two files to whitelist")
         return
 
-    try:
-        ids = get_ids(files)
-    except Exception as e:
-        logging.warning(e)
-        return
-
     retval = []
-    with get_db() as db_conn:
-        c = db_conn.cursor()
-        for id1, id2 in combinations(ids,2):
-            try:
-                if id1 > id2:
-                    id1, id2 = id2, id1
-                retval.append((id1, id2))
-                c.execute("insert into whitelist values (?,?)", (id1, id2))
-                db_conn.commit()
-            except:
-                db_conn.rollback()
-        c.close()
+    for f1, f2 in combinations(list(ids),2):
+        try:
+            dbi.whitelist(f1.fid, f2.fid)
+            dbi.commit()
+            retval.append((f1, f2))
+            logging.info("Whitelisted %s and %s" % (f1.name, f2.name))
+        except:
+            logging.error("Failed to whitelist pair %s - %s", f1.name, f2.name, exc_info=False)
+            dbi.rollback()
     return retval
 
 def format_duration(seconds):
@@ -439,7 +364,9 @@ def format_duration(seconds):
         
 class VidDupUI(object):
 
-    def __init__(self, duplicates):
+    def __init__(self, dbi, params, duplicates):
+        self.dbi = dbi
+        self.params = params
         self.duplicates = duplicates
 
     def start(self):
@@ -512,8 +439,7 @@ class VidDupUI(object):
         args[0].destroy()
         index = args[1]
         fnames = [d[0].name for d in self.duplicates[index]]
-        logging.info("Whitelisting %s", fnames)
-        pairs = whitelist(fnames)
+        pairs = whitelist(self.dbi, self.params, fnames)
 
     def onDelete(self, *args):
         fname = args[1]
@@ -533,21 +459,28 @@ class VidDupUI(object):
 
     def onPurge(self, *args):
         switch = self.builder.get_object("delete_switch")
-        tidy_db(switch.get_active())
+        handle_purge(self.dbi, self.params, switch.get_active())
 
     def make_label(self, fileinfo):
         return format_duration(fileinfo.duration) + " " + fileinfo.name
 
-def handle_import(args):
-    for fname in get_files(args.dir, args.vidext.replace(" ","").split(",")):
-        import_file(fname)
-
-def handle_search(params):
-    idx = Index(params)
+def handle_import(dbi, params):
+    if params.dir:
+        for fname in get_files(params.dir, params.vidext.replace(" ","").split(",")):
+            import_file(dbi, params, fname)
+    if params.file:
+        import_file(dbi, params, params.file)
+            
+def handle_search(sbi, params):
+    idx = Index(dbi, params)
     duplicates = idx.search()
 
+    if len(duplicates) == 0:
+        logging.info("No candidates found, giving up")
+        return
+    
     if params.ui:
-        ui = VidDupUI(duplicates)
+        ui = VidDupUI(dbi, params, duplicates)
         ui.start()
     else:
         for match in duplicates:
@@ -555,39 +488,6 @@ def handle_search(params):
             for row in match:
                 fileinfo, offset = row
                 logging.info("ffplay -ss %s '%s'", format_duration(offset), fileinfo.name)
-
-def fixfileinfo(params):
-    with get_db() as db_conn:
-        c = db_conn.cursor()
-        c.execute("select id, name, fps, duration from filenames order by id asc")
-        for i in tqdm(c.fetchall()):
-            fid, name, fps, duration = i
-            if fps and duration:
-                continue
-            logging.info("fetching metadata for %s", name)
-            video = imageio.get_reader(name, "vidhash")
-            md = video.get_meta_data()
-            fps = md["fps"]
-            duration = md["duration"]
-            c.execute("update filenames set duration=?, fps=? where rowid=?", (duration, fps, fid))
-            db_conn.commit()
-        c.close()
-
-# def fixfilenames(params):
-#     with get_db() as db_conn:
-#         c = db_conn.cursor()
-#         c.execute("select id, name from filenames order by id asc")
-#         for i in c.fetchall():
-#             id, name = i
-#             if name.startswith(os.path.sep):
-#                 continue
-#             logging.info("fixing filename %s", name)
-#             if os.access(name, os.R_OK):
-#                 absname = os.path.abspath(name)
-#                 logging.info("abspath %s", absname)
-#                 c.execute("update filenames set name=? where id=?", [absname, id])
-#             db_conn.commit()
-#         c.close()
 
 def fixfilenames(args):
     for fname in get_files(args.dir, args.vidext.replace(" ","").split(",")):
@@ -605,11 +505,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--purge", default=False, action="store_true", help="Purge deleted files from database (dry run mode)")
     parser.add_argument("--delete", default=False, action="store_true", help="Really delete from database in purge")
+    parser.add_argument("--nice", type=int, help="Nice level for background operation, default 5", default=5)
     parser.add_argument("--dir", help="Import video hashes from directory and its subdirectories")
+    parser.add_argument("--file", help="Import video hashes for a single file")
+    parser.add_argument("--refresh", action="store_true", help="Re-hash file but keep whitelistings intact", default=False)
     parser.add_argument("--search", action="store_true", help="Search duplicates in database")
     parser.add_argument("--ignore_start", type=int, default=0, help="Ignore search results startin in the first seconds of a movie, default 0")
     parser.add_argument("--ignore_end", type=int, default=0, help="Ignore search results startingstartin in the last seconds of a movie, default 0")
-    parser.add_argument("--db", help="Database file", default=DB_URI_DEFAULT)
+    parser.add_argument("--db", help="SQLITE3 database file")
+
+    parser.add_argument("--dbhost", help="PostgreSQL database server host", default="synology")
+    parser.add_argument("--dbport", type=int, help="PostgreSQL database server port", default=5433)
+    parser.add_argument("--dbname", help="PostgreSQL database name", default="viddup")
+    parser.add_argument("--dbuser", help="PostgreSQL database user name", default="viddup")
+    parser.add_argument("--dbpwd", help="PostgreSQL database user password", default="viddup")
+    
     parser.add_argument("--indexlength", default=10, type=int, help="Length of index in searches, smaller values will produce more false positives, default 10")
     parser.add_argument("--scenelength", default=300, type=int, help="Length in seconds of scenes to match, default 300")
     parser.add_argument("--radius", default=3.0, type=float, help="Measure for acceptable index difference. Higher values will result in more false positives, default 3.0")
@@ -618,17 +528,21 @@ if __name__ == "__main__":
     parser.add_argument("--whitelist", nargs='+', help="Whitelist a list of files")
     parser.add_argument("--knnlib", default=ANN_LIBS[0], help="knn library to use, choose " + ", ".join(ANN_LIBS))
     parser.add_argument("--vidext", default=KNOWN_VID_TYPES_DEFAULT, help="filename extensions to consider, default %s" % KNOWN_VID_TYPES_DEFAULT)
-    parser.add_argument("--fixfileinfo", default=False, action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--fixfilenames", default=False, action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--debug", default=False, action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--profile", default=False, action="store_true", help=argparse.SUPPRESS)
 
     params = parser.parse_args()
 
-    DB_URI=params.db
+    try:
+        nl = os.nice(0)
+        nl = os.nice(max(params.nice - nl, 0))
+        logging.info("Nice level %d", nl)
+    except:
+        logging.info("Setting nice level not supported")
 
-    make_schema()
-
+    dbi = get_db(params)
+        
     if params.knnlib not in ANN_LIBS:
         logging.error("Unsupported knn library %s", params.knnlib)
         sys.exit(1)
@@ -637,9 +551,6 @@ if __name__ == "__main__":
         profile = cProfile.Profile()
         profile.enable()
 
-    if params.fixfileinfo:
-        fixfileinfo(params)
-
     if params.fixfilenames:
         if params.dir:
             fixfilenames(params)
@@ -647,16 +558,17 @@ if __name__ == "__main__":
             logging.error("please set --dir option as well")
 
     if params.whitelist:
-        whitelist(params.whitelist)
+        whitelist(dbi, params)
     
     if params.purge:
-        tidy_db(params.delete)
-
-    if params.dir:
-        handle_import(params)
+        dbi.tidy_db()
+        handle_purge(dbi, params)
+        
+    if params.dir or params.file:
+        handle_import(dbi, params)
 
     if params.search:
-        handle_search(params)
+        handle_search(dbi, params)
 
     if params.profile:
         profile.create_stats()

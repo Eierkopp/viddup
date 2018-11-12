@@ -4,5 +4,5 @@
 
 override_dh_install:
 	dh_install bin/ /usr
-	dh_install lib/* /usr/lib/python3/dist-packages/viddup
+	dh_install lib/viddup/* /usr/lib/python3/dist-packages/viddup
 	dh_install glade/viddup.glade /usr/share/viddup/
