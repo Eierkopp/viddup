@@ -1,3 +1,9 @@
+viddup (1.1) unstable; urgency=low
+
+  * Stor search results for later inspection
+
+ -- Depperter Depp <depp@eierkopp.ddnss.org>  Mon, 4 Feb 2019 13:12:00 +0200
+
 viddup (1.0) unstable; urgency=medium
 
   * Initial Release.

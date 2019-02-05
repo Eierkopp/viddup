@@ -36,7 +36,6 @@ class DB(DBBase):
                            (id1 integer not null references filenames(id) on delete cascade, 
                             id2 integer not null references filenames(id) on delete cascade,
                             primary key (id1, id2))""")
-            print("anton")
 
     def del_file(self, fid):
         with self.cursor() as c:
