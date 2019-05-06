@@ -1,15 +1,12 @@
 #!/usr/bin/python3
 
 import argparse
-import bisect
 from itertools import combinations
 import importlib
 import logging
 import os
-from pprint import pprint
 import subprocess
 import time
-import types
 import sys
 from tqdm import tqdm
 import gi
@@ -29,11 +26,13 @@ import yaml
 
 from viddup import FileInfo, get_db
 
+NCOLS = 70
+
 class TqdmStream:
 
     def __init__(self, stream):
         self.stream = stream
-    
+
     def write(self, data):
         data = data.rstrip("\r\n")
         if data:
@@ -57,7 +56,7 @@ KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts, asf"
 INDEX_DIST = 10 # seconds
 ANN_LIBS = []
 
-for module_name in [ "hnswlib", "cyflann", "annoy" ]:
+for module_name in ["hnswlib", "cyflann", "annoy"]:
     try:
         importlib.import_module(module_name)
         ANN_LIBS.append(module_name)
@@ -65,8 +64,10 @@ for module_name in [ "hnswlib", "cyflann", "annoy" ]:
         pass
 
 if not ANN_LIBS:
-    logging.error("Please install at least one of the k-nearest neighbor libraries: hnswlib, cyflann, or annoy")
+    logging.error("Please install at least one of the k-nearest neighbor "
+                  "libraries: hnswlib, cyflann, or annoy")
     sys.exit(1)
+
 
 class Index:
 
@@ -80,7 +81,7 @@ class Index:
         self.idx_get_nn = getattr(self, "idx_get_nn_%s" % params.knnlib)
         self.idx_get_length = getattr(self, "idx_get_length_%s" % params.knnlib)
         self.idx_get_row = getattr(self, "idx_get_row_%s" % params.knnlib)
-        
+
         self.init_index()
 
     def search(self):
@@ -92,8 +93,8 @@ class Index:
 
         known_duplicates = set()
         result = []
-        
-        for i in tqdm(range(0, data_length, step)):
+
+        for i in tqdm(range(0, data_length, step), ascii=True, ncols=NCOLS):
             elem_idx = self.idx_get_nn(i, radius)
             elem_idx.sort()
             if len(elem_idx) > 1:
@@ -111,7 +112,7 @@ class Index:
 
                 if not fids:
                     continue
-                
+
                 known_duplicates.update(set(pairs))
 
                 known_fids = set()
@@ -149,7 +150,7 @@ class Index:
         ignore_start = self.params.ignore_start
         ignore_end = self.params.ignore_end
 
-        with tqdm(self.dbi.get_file_infos()) as progress_bar:
+        with tqdm(self.dbi.get_file_infos(), ascii=True, ncols=NCOLS) as progress_bar:
             for fileinfo in progress_bar:
                 min_frame = int(ignore_start * fileinfo.fps)
                 max_frame = int((fileinfo.duration - ignore_end) * fileinfo.fps)
@@ -172,11 +173,12 @@ class Index:
                     self.frame_list.append(frames[i])
 
         self.mk_index(items)
-                              
+
     # annoy support, c.f. https://github.com/spotify/annoy
     def mk_idx_annoy(self, items):
         logging.info("Start building annoy index")
-        self.idx = self.knn_module.AnnoyIndex(self.params.indexlength, metric="euclidean")
+        self.idx = self.knn_module.AnnoyIndex(self.params.indexlength,
+                                              metric="euclidean")
         for n, item in enumerate(items):
             self.idx.add_item(n, item)
         self.idx.build(20)
@@ -186,8 +188,10 @@ class Index:
 
     def idx_get_nn_annoy(self, rownum, radius):
         result = []
-        count=20
-        elem_idx, elem_dists = self.idx.get_nns_by_item(rownum, count, include_distances=True)
+        count = 20
+        elem_idx, elem_dists = self.idx.get_nns_by_item(rownum,
+                                                        count,
+                                                        include_distances=True)
         for n, item in enumerate(elem_idx):
             if elem_dists[n] < radius:
                 result.append(item)
@@ -195,7 +199,7 @@ class Index:
 
     def idx_get_row_annoy(self, rownum):
         return self.idx.get_item_vector(rownum)
-    
+
     # flann support, c.f. https://github.com/dougalsutherland/cyflann
     def mk_idx_cyflann(self, items):
         logging.info("Start building flann index")
@@ -246,7 +250,6 @@ def get_files(basedir, vid_ext):
 
 def fix_duration(vidname):
     wd = os.path.dirname(vidname)
-    vidext = os.path.splitext(vidname)[1]
     if os.access(vidname, os.W_OK) and os.access(wd, os.W_OK):
         with open(vidname, "rb") as f:
             os.remove(vidname)
@@ -254,24 +257,24 @@ def fix_duration(vidname):
             proc.wait()
     else:
         logging.warning("target %s is not writable, giving up", vidname)
-        
+
 def get_hashes(vidname, fix=True):
     video = imageio.get_reader(vidname, "vidhash")
     md = video.get_meta_data()
     fps = md["fps"]
     nframes = md["nframes"]
-    if "duration" not in md and fix:
+    if ("duration" not in md or md["duration"] > 3 * 3600) and fix:
         fix_duration(vidname)
         logging.info("Duration of %s hopefully fixed", vidname)
         return get_hashes(vidname, False)
 
     duration = md["duration"]
-            
+
     logging.info("Hashing %s %2.2ff/s: %s", format_duration(duration), fps, vidname)
-    
+
     brightness = []
     try:
-        with tqdm(video.iter_data(), total=nframes, leave=False) as progress_bar:
+        with tqdm(video.iter_data(), total=nframes, leave=False, ascii=True, ncols=NCOLS) as progress_bar:
             for frame in progress_bar:
                 brightness.append(frame.mean())
     except KeyboardInterrupt:
@@ -284,10 +287,11 @@ def get_hashes(vidname, fix=True):
     extrema = get_extrema(brightness, INDEX_DIST, fps)
     return extrema, fps, duration, brightness
 
+
 def get_extrema(hashes, min_dist, fps):
-    """Take the list of brightness values per frame and compute 
+    """Take the list of brightness values per frame and compute
     a list of pairs (frame number and local maximum)"""
-    
+
     order = int(min_dist * fps)
     idx = argrelmax(np.array(hashes), order=order)[0]
     result = []
@@ -297,33 +301,38 @@ def get_extrema(hashes, min_dist, fps):
         old_idx = i
     return result
 
+
 def import_file(dbi, params, fname):
     """Compute and import hashes of the given filename into the database"""
     start_time = time.time()
     try:
         if dbi.is_name_in_db(fname):
             if not params.refresh:
-                logging.info("File %s already imported", fname)        
+                logging.info("File %s already imported", fname)
                 return
 
-        index_info, fps, duration, brightness = get_hashes(fname, params.fixduration)
+        index_info, fps, duration, brightness = get_hashes(fname,
+                                                           params.fixduration)
 
         fi = dbi.insert_file(fname, fps, duration)
 
         dbi.insert_hashes(fi.fid, index_info)
 
         dbi.insert_brightness(fi.fid, brightness)
-        
+
         dbi.commit()
-        logging.info("File %s imported in %s", fname, format_duration(time.time() - start_time))
-        
+        logging.info("File %s imported in %s",
+                     fname,
+                     format_duration(time.time() - start_time))
+
     except KeyboardInterrupt:
         logging.warning("Aborted")
         raise
-    except:
+    except Exception:
         logging.warning("Failed to insert hashes for %s", fname, exc_info=True)
     finally:
         dbi.rollback()
+
 
 def handle_purge(dbi, params, do_delete=None):
 
@@ -336,8 +345,10 @@ def handle_purge(dbi, params, do_delete=None):
         fn_fis.append(fi.fid)
         if not os.access(fi.name, os.R_OK):
             del_files.append(fi)
-        
-    logging.warning("Need to delete %d of %d files", len(del_files), len(fn_fis))
+
+    logging.warning("Need to delete %d of %d files",
+                    len(del_files),
+                    len(fn_fis))
     if do_delete:
         for fi in del_files:
             logging.info("deleting %s", fi.name)
@@ -345,7 +356,7 @@ def handle_purge(dbi, params, do_delete=None):
     else:
         for fi in del_files:
             logging.info(fi.name)
-                
+
 
 def whitelist(dbi, params, files=None):
 
@@ -353,7 +364,7 @@ def whitelist(dbi, params, files=None):
 
     if files is None:
         files = params.whitelist
-    
+
     ids = set()
     for f in files:
         fid = dbi.get_id(f)
@@ -367,20 +378,22 @@ def whitelist(dbi, params, files=None):
         return
 
     retval = []
-    for f1, f2 in combinations(list(ids),2):
+    for f1, f2 in combinations(list(ids), 2):
         try:
             dbi.whitelist(f1.fid, f2.fid)
             dbi.commit()
             retval.append((f1, f2))
             logging.info("Whitelisted %s and %s" % (f1.name, f2.name))
-        except:
+        except Exception:
             logging.error("Failed to whitelist pair %s - %s", f1.name, f2.name, exc_info=False)
             dbi.rollback()
     return retval
 
+
 def format_duration(seconds):
     return time.strftime("%H:%M:%S", time.gmtime(seconds))
-        
+
+
 class VidDupUI(object):
 
     def __init__(self, dbi, params, duplicates):
@@ -391,7 +404,7 @@ class VidDupUI(object):
     def start(self):
         self.builder = Gtk.Builder()
         self.builder.add_from_file("/usr/share/viddup/viddup.glade")
-        
+
         window = self.builder.get_object("app")
 
         data_grid = Gtk.Grid()
@@ -423,14 +436,14 @@ class VidDupUI(object):
             data_grid.insert_row(rows)
             data_grid.attach(box, 0, rows, 3, 1)
             rows += 1
-            
+
         main_area = self.builder.get_object("main_area")
         main_area.add(data_grid)
 
         self.builder.connect_signals(self)
-        
+
         window.show_all()
-        
+
         Gtk.main()
 
     def onPlay(self, *args):
@@ -438,27 +451,31 @@ class VidDupUI(object):
         procs = []
         for fileinfo, offset, _ in self.duplicates[index]:
             if os.access(fileinfo.name, os.R_OK):
-                procs.append(subprocess.Popen(["ffplay", "-sn", "-ss", format_duration(offset), fileinfo.name],
-                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+                procs.append(subprocess.Popen(["ffplay", "-sn", "-ss",
+                                               format_duration(offset),
+                                               fileinfo.name],
+                                              stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL))
 
         finished = not bool(procs)
         while not finished:
             for p in procs:
-                if (0,0) != os.waitpid(p.pid, os.WNOHANG):
+                if (0, 0) != os.waitpid(p.pid, os.WNOHANG):
                     finished = True
                     break
             time.sleep(0.2)
-            
+
         for p in procs:
             try:
                 p.kill()
-            except: pass
+            except Exception:
+                pass
 
     def onWhitelist(self, *args):
         args[0].destroy()
         index = args[1]
         fnames = [d[0].name for d in self.duplicates[index]]
-        pairs = whitelist(self.dbi, self.params, fnames)
+        whitelist(self.dbi, self.params, fnames)
 
     def onDelete(self, *args):
         fname = args[1]
@@ -472,7 +489,7 @@ class VidDupUI(object):
                         label.set_use_markup(True)
         except Exception as e:
             logging.error("Failed to delete %s: %s", fname, e)
-        
+
     def onQuit(self, *args):
         Gtk.main_quit(*args)
 
@@ -483,13 +500,16 @@ class VidDupUI(object):
     def make_label(self, fileinfo):
         return format_duration(fileinfo.duration) + " " + fileinfo.name
 
+
 def handle_import(dbi, params):
     if params.dir:
-        for fname in get_files(params.dir, params.vidext.replace(" ","").split(",")):
+        for fname in get_files(params.dir,
+                               params.vidext.replace(" ", "").split(",")):
             import_file(dbi, params, fname)
     if params.file:
         import_file(dbi, params, params.file)
-            
+
+
 def handle_search(dbi, params):
     idx = Index(dbi, params)
     duplicates = idx.search()
@@ -501,7 +521,7 @@ def handle_search(dbi, params):
     if params.searchres:
         with open(params.searchres, "w") as f:
             yaml.dump(duplicates, f, indent=2)
-    
+
     if params.ui:
         ui = VidDupUI(dbi, params, duplicates)
         ui.start()
@@ -512,10 +532,11 @@ def handle_search(dbi, params):
                 fileinfo, offset = row
                 logging.info("ffplay -ss %s '%s'", format_duration(offset), fileinfo.name)
 
+
 def handle_searchres(dbi, params):
     with open(params.searchres) as f:
         duplicates = yaml.load(f)
-        
+
     if params.ui:
         ui = VidDupUI(dbi, params, duplicates)
         ui.start()
@@ -536,7 +557,7 @@ def fixfilenames(args):
             new_fname = fn.decode("utf8")
             logging.info("changed into %s", new_fname)
             os.rename(fname, new_fname)
-        
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -556,7 +577,7 @@ if __name__ == "__main__":
     parser.add_argument("--dbname", help="PostgreSQL database name", default="viddup")
     parser.add_argument("--dbuser", help="PostgreSQL database user name", default="viddup")
     parser.add_argument("--dbpwd", help="PostgreSQL database user password", default="viddup")
-    
+
     parser.add_argument("--indexlength", default=10, type=int, help="Length of index in searches, smaller values will produce more false positives, default 10")
     parser.add_argument("--scenelength", default=300, type=int, help="Length in seconds of scenes to match, default 300")
     parser.add_argument("--radius", default=3.0, type=float, help="Measure for acceptable index difference. Higher values will result in more false positives, default 3.0")
@@ -577,11 +598,11 @@ if __name__ == "__main__":
         nl = os.nice(0)
         nl = os.nice(max(params.nice - nl, 0))
         logging.info("Nice level %d", nl)
-    except:
+    except Exception:
         logging.info("Setting nice level not supported")
 
     dbi = get_db(params)
-        
+
     if params.knnlib not in ANN_LIBS:
         logging.error("Unsupported knn library %s", params.knnlib)
         sys.exit(1)
@@ -598,11 +619,11 @@ if __name__ == "__main__":
 
     if params.whitelist:
         whitelist(dbi, params)
-    
+
     if params.purge:
         dbi.tidy_db()
         handle_purge(dbi, params)
-        
+
     if params.dir or params.file:
         handle_import(dbi, params)
 
@@ -616,4 +637,3 @@ if __name__ == "__main__":
         s = pstats.Stats(profile)
         s.sort_stats("cumulative")
         s.print_stats(50)
-
