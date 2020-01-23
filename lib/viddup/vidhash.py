@@ -79,9 +79,9 @@ def get_exe():
     # https://bugs.python.org/issue26083
     except (OSError, ValueError, sp.CalledProcessError):
         pass
-    
+
     plat = get_platform()
-    
+
     # Check if ffmpeg is installed in Python environment
     # (e.g. via conda install ffmpeg -c conda-forge)
     exe = None
@@ -97,7 +97,7 @@ def get_exe():
                 return exe
         except (OSError, ValueError, sp.CalledProcessError):
             pass
-    
+
     # Finally, try and use the executable that we provide
     if plat and plat in FNAME_PER_PLATFORM:
         try:
@@ -137,28 +137,28 @@ else:  # pragma: no cover
 class VidHashFormat(Format):
     """ The ffmpeg format provides reading and writing for a wide range
     of movie formats such as .avi, .mpeg, .mp4, etc. And also to read
-    streams from webcams and USB cameras. 
-    
+    streams from webcams and USB cameras.
+
     To read from camera streams, supply "<video0>" as the filename,
     where the "0" can be replaced with any index of cameras known to
     the system.
-    
+
     Note that for reading regular video files, the avbin plugin is more
     efficient.
-    
+
     By setting the environment variable 'IMAGEIO_FFMPEG_EXE' the
-    ffmpeg executable to use can be overridden. 
+    ffmpeg executable to use can be overridden.
     E.g. ``os.environ['IMAGEIO_FFMPEG_EXE'] = '/path/to/my/ffmpeg'``
     Otherwise, imageio will look for ffmpeg on the system path and then
     download ffmpeg if not found.
-    
+
     Parameters for reading
     ----------------------
     loop : bool
         If True, the video will rewind as soon as a frame is requested
         beyond the last frame. Otherwise, IndexError is raised. Default False.
     size : str | tuple
-        The frame size (i.e. resolution) to read the images, e.g. 
+        The frame size (i.e. resolution) to read the images, e.g.
         (100, 100) or "640x480". For camera streams, this allows setting
         the capture resolution. For normal video data, ffmpeg will
         rescale the data.
@@ -173,7 +173,7 @@ class VidHashFormat(Format):
         ['-err_detect', 'aggressive']
     print_info : bool
         Print information about the video file as reported by ffmpeg.
-    
+
     Parameters for saving
     ---------------------
     fps : scalar
@@ -506,7 +506,7 @@ class VidHashFormat(Format):
             videolines = [l for l in lines if l.lstrip().startswith('Stream ')
                           and ' Video: ' in l]
             line = videolines[0]
-            
+
             # get the frame rate
             matches = re.findall(" ([0-9]+\.?[0-9]*) (tbr|fps)", line)
             fps = 0
@@ -803,10 +803,10 @@ class FrameCatcher(threading.Thread):
         self.setDaemon(True)  # do not let this thread hold up Python shutdown
         self._should_stop = False
         self.start()
-    
+
     def stop_me(self):
         self._should_stop = True
-    
+
     def get_frame(self):
         while self._frame is None:  # pragma: no cover - an init thing
             time.sleep(0.001)
@@ -857,7 +857,7 @@ class StreamCatcher(threading.Thread):
 
     def stop_me(self):
         self._should_stop = True
-    
+
     @property
     def header(self):
         """ Get header text. Empty string if the header is not yet parsed.
@@ -883,10 +883,10 @@ class StreamCatcher(threading.Thread):
         return self._header + '\n' + lines.decode('utf-8', 'ignore')
 
     def run(self):
-        
+
         # Create ref here so it still exists even if Py is shutting down
         limit_lines_local = limit_lines
-        
+
         while not self._should_stop:
             time.sleep(0.001)
             # Read one line. Detect when closed, and exit

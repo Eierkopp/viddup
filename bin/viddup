@@ -10,23 +10,24 @@ import time
 import sys
 from tqdm import tqdm
 import gi
-from gi.repository import GObject
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk
 import imageio
-from viddup import vidhash
 from scipy.signal import argrelmax
 import numpy as np
-import tempfile
 import cProfile
 import pstats
 import multiprocessing
 from collections import namedtuple
+import warnings
 import yaml
 
-from viddup import FileInfo, get_db
+from viddup import get_db
+
+import gi.repository
+gi.require_version('Gtk', '3.0')  # noqa: E402
+from gi.repository import Gtk, GLib
 
 NCOLS = 70
+
 
 class TqdmStream:
 
@@ -39,12 +40,15 @@ class TqdmStream:
             tqdm.write(data, file=self.stream)
             self.stream.flush()
 
+
 log_stream = TqdmStream(sys.stdout)
 
-import warnings
+
+# send warnings to log stream
 def warn_msg_impl(msg):
     text = warnings._formatwarnmsg(msg)
     log_stream.write(text)
+
 
 warnings._showwarnmsg_impl = warn_msg_impl
 
@@ -52,8 +56,8 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)-15s;%(levelname)s;%(message)s',
                     stream=log_stream)
 
-KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts, asf"
-INDEX_DIST = 10 # seconds
+KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts, asf, wmv"
+INDEX_DIST = 10  # seconds
 ANN_LIBS = []
 
 for module_name in ["hnswlib", "cyflann", "annoy"]:
@@ -124,9 +128,14 @@ class Index:
                         known_fids.add(fid)
                         fileinfo, frame = self.fi_list[item], self.frame_list[item]
                         if debug:
-                            logging.info("%4d, %-50s: %s", fileinfo.fid, fileinfo.name[-50:], self.idx_get_row(item))
+                            logging.info("%4d, %-50s: %s",
+                                         fileinfo.fid,
+                                         fileinfo.name[-50:],
+                                         self.idx_get_row(item))
                         details.append([fileinfo, frame/fileinfo.fps])
-                    except:
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception:
                         logging.info("Error processing: %s, purge required?", item, exc_info=True)
                 if len(details) > 1:
                     result.append(details)
@@ -156,7 +165,7 @@ class Index:
                 max_frame = int((fileinfo.duration - ignore_end) * fileinfo.fps)
 
                 frames, hashes = dbi.get_hashes(fileinfo.fid, min_frame, max_frame)
-                if len(hashes) < 5: # ignore fid, if list of hashes is too short
+                if len(hashes) < 5:  # ignore fid, if list of hashes is too short
                     continue
 
                 item_count = max(0, len(hashes) - index_length)
@@ -241,6 +250,7 @@ class Index:
     def idx_get_row_hnswlib(self, rownum):
         return self.__items[rownum]
 
+
 def get_files(basedir, vid_ext):
     for root, _, files in os.walk(basedir):
         for f in files:
@@ -248,15 +258,19 @@ def get_files(basedir, vid_ext):
             if ext.lower().lstrip(".") in vid_ext:
                 yield os.path.abspath(os.path.join(root, f))
 
+
 def fix_duration(vidname):
     wd = os.path.dirname(vidname)
     if os.access(vidname, os.W_OK) and os.access(wd, os.W_OK):
         with open(vidname, "rb") as f:
             os.remove(vidname)
-            proc = subprocess.Popen(["ffmpeg", "-i", "pipe:", "-vcodec", "copy", "-acodec", "copy", vidname], stdin=f)
+            proc = subprocess.Popen(["ffmpeg", "-i", "pipe:",
+                                     "-vcodec", "copy",
+                                     "-acodec", "copy", vidname], stdin=f)
             proc.wait()
     else:
         logging.warning("target %s is not writable, giving up", vidname)
+
 
 def get_hashes(vidname, fix=True):
     video = imageio.get_reader(vidname, "vidhash")
@@ -274,8 +288,8 @@ def get_hashes(vidname, fix=True):
 
     brightness = []
     try:
-        with tqdm(video.iter_data(), total=nframes, leave=False, ascii=True, ncols=NCOLS) as progress_bar:
-            for frame in progress_bar:
+        with tqdm(video.iter_data(), total=nframes, leave=False, ascii=True, ncols=NCOLS) as pb:
+            for frame in pb:
                 brightness.append(frame.mean())
     except KeyboardInterrupt:
         raise
@@ -369,7 +383,7 @@ def whitelist(dbi, params, files=None):
     for f in files:
         fid = dbi.get_id(f)
         if fid is not None:
-            ids.add(Entry._make([f,fid]))
+            ids.add(Entry._make([f, fid]))
         else:
             logging.warn("File %s not found in DB", f)
 
@@ -485,7 +499,8 @@ class VidDupUI(object):
             for group in self.duplicates:
                 for fileinfo, offset, label in group:
                     if fname == fileinfo.name:
-                        label.set_markup("<span strikethrough='true'>%s</span>" % GObject.markup_escape_text(self.make_label(fileinfo)))
+                        label.set_markup("<span strikethrough='true'>%s</span>"
+                                         % GLib.markup_escape_text(self.make_label(fileinfo)))
                         label.set_use_markup(True)
         except Exception as e:
             logging.error("Failed to delete %s: %s", fname, e)
@@ -547,50 +562,123 @@ def handle_searchres(dbi, params):
                 fileinfo, offset = row
                 logging.info("ffplay -ss %s '%s'", format_duration(offset), fileinfo.name)
 
+
 def fixfilenames(args):
-    for fname in get_files(args.dir, args.vidext.replace(" ","").split(",")):
+    for fname in get_files(args.dir, args.vidext.replace(" ", "").split(",")):
         try:
             fname.encode("utf8")
-        except:
+        except Exception:
             logging.warn("invalid filename %s", fname, exc_info=True)
             fn = fname.encode("utf8", "ignore")
             new_fname = fn.decode("utf8")
             logging.info("changed into %s", new_fname)
             os.rename(fname, new_fname)
 
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--purge", default=False, action="store_true", help="Purge deleted files from database (dry run mode)")
-    parser.add_argument("--delete", default=False, action="store_true", help="Really delete from database in purge")
-    parser.add_argument("--nice", type=int, help="Nice level for background operation, default 5", default=5)
-    parser.add_argument("--dir", help="Import video hashes from directory and its subdirectories")
-    parser.add_argument("--file", help="Import video hashes for a single file")
-    parser.add_argument("--refresh", action="store_true", help="Re-hash file but keep whitelistings intact", default=False)
-    parser.add_argument("--search", action="store_true", help="Search duplicates in database")
-    parser.add_argument("--ignore_start", type=int, default=0, help="Ignore search results startin in the first seconds of a movie, default 0")
-    parser.add_argument("--ignore_end", type=int, default=0, help="Ignore search results startingstartin in the last seconds of a movie, default 0")
-    parser.add_argument("--db", help="SQLITE3 database file")
-
-    parser.add_argument("--dbhost", help="PostgreSQL database server host", default="synology")
-    parser.add_argument("--dbport", type=int, help="PostgreSQL database server port", default=5433)
-    parser.add_argument("--dbname", help="PostgreSQL database name", default="viddup")
-    parser.add_argument("--dbuser", help="PostgreSQL database user name", default="viddup")
-    parser.add_argument("--dbpwd", help="PostgreSQL database user password", default="viddup")
-
-    parser.add_argument("--indexlength", default=10, type=int, help="Length of index in searches, smaller values will produce more false positives, default 10")
-    parser.add_argument("--scenelength", default=300, type=int, help="Length in seconds of scenes to match, default 300")
-    parser.add_argument("--radius", default=3.0, type=float, help="Measure for acceptable index difference. Higher values will result in more false positives, default 3.0")
-    parser.add_argument("--ui", action="store_true", help="Launch ui after search")
-    parser.add_argument("--searchres", help="Filename of search result, used in --search and --ui without --search")
-    parser.add_argument("--step", type=int, default=1, help="Step width for searching index, default 1")
-    parser.add_argument("--whitelist", nargs='+', help="Whitelist a list of files")
-    parser.add_argument("--knnlib", default=ANN_LIBS[0], help="knn library to use, choose " + ", ".join(ANN_LIBS))
-    parser.add_argument("--vidext", default=KNOWN_VID_TYPES_DEFAULT, help="filename extensions to consider, default %s" % KNOWN_VID_TYPES_DEFAULT)
-    parser.add_argument("--fixduration", default=False, action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--fixfilenames", default=False, action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--debug", default=False, action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--profile", default=False, action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--purge",
+                        default=False,
+                        action="store_true",
+                        help="Purge deleted files from database (dry run mode)")
+    parser.add_argument("--delete",
+                        default=False,
+                        action="store_true",
+                        help="Really delete from database in purge")
+    parser.add_argument("--nice",
+                        type=int,
+                        help="Nice level for background operation, default 5",
+                        default=5)
+    parser.add_argument("--dir",
+                        help="Import video hashes from directory and its subdirectories")
+    parser.add_argument("--file",
+                        help="Import video hashes for a single file")
+    parser.add_argument("--refresh",
+                        action="store_true",
+                        help="Re-hash file but keep whitelistings intact",
+                        default=False)
+    parser.add_argument("--search",
+                        action="store_true",
+                        help="Search duplicates in database")
+    parser.add_argument("--ignore_start",
+                        type=int,
+                        default=0,
+                        help="Ignore search results startin in"
+                        " the first seconds of a movie, default 0")
+    parser.add_argument("--ignore_end",
+                        type=int,
+                        default=0,
+                        help="Ignore search results startingstartin in the last"
+                        " seconds of a movie, default 0")
+    parser.add_argument("--db",
+                        help="SQLITE3 database file")
+    parser.add_argument("--dbhost",
+                        help="PostgreSQL database server host",
+                        default="gateway")
+    parser.add_argument("--dbport",
+                        type=int,
+                        help="PostgreSQL database server port",
+                        default=5433)
+    parser.add_argument("--dbname",
+                        help="PostgreSQL database name",
+                        default="viddup")
+    parser.add_argument("--dbuser",
+                        help="PostgreSQL database user name",
+                        default="viddup")
+    parser.add_argument("--dbpwd",
+                        help="PostgreSQL database user password",
+                        default="viddup")
+    parser.add_argument("--indexlength",
+                        default=10,
+                        type=int,
+                        help="Length of index in searches, smaller"
+                        " values will produce more false positives, default 10")
+    parser.add_argument("--scenelength",
+                        default=300,
+                        type=int,
+                        help="Length in seconds of scenes to match, default 300")
+    parser.add_argument("--radius",
+                        default=3.0,
+                        type=float,
+                        help="Measure for acceptable index difference. Higher"
+                        " values will result in more false positives, default 3.0")
+    parser.add_argument("--ui",
+                        action="store_true",
+                        help="Launch ui after search")
+    parser.add_argument("--searchres",
+                        help="Filename of search result, used"
+                        " in --search and --ui without --search")
+    parser.add_argument("--step",
+                        type=int,
+                        default=1,
+                        help="Step width for searching index, default 1")
+    parser.add_argument("--whitelist",
+                        nargs='+',
+                        help="Whitelist a list of files")
+    parser.add_argument("--knnlib",
+                        default=ANN_LIBS[0],
+                        help="knn library to use, choose " + ", ".join(ANN_LIBS))
+    parser.add_argument("--vidext",
+                        default=KNOWN_VID_TYPES_DEFAULT,
+                        help="filename extensions to consider,"
+                        " default %s" % KNOWN_VID_TYPES_DEFAULT)
+    parser.add_argument("--fixduration",
+                        default=False,
+                        action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--fixfilenames",
+                        default=False,
+                        action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--debug",
+                        default=False,
+                        action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--profile",
+                        default=False,
+                        action="store_true",
+                        help=argparse.SUPPRESS)
 
     params = parser.parse_args()
 
