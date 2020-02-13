@@ -112,15 +112,14 @@ class Index:
                 pairs = list(combinations(fids, 2))
 
                 for pair in pairs[:]:
-                    if pair in known_duplicates or self.is_whitelisted(pair):
+                    if pair[0] == pair[1] or pair in known_duplicates or self.is_whitelisted(pair):
+                        known_duplicates.add(pair)
                         pairs.remove(pair)
                 fids = set(i[0] for i in pairs).union(i[1] for i in pairs)
-
                 if not fids:
                     continue
 
                 known_duplicates.update(set(pairs))
-
                 known_fids = set()
                 for n, item in enumerate(elem_idx):
                     try:
@@ -190,6 +189,10 @@ class Index:
         logging.info("Start building annoy index")
         self.idx = self.knn_module.AnnoyIndex(self.params.indexlength,
                                               metric="euclidean")
+        if self.params.fixspeed:
+            for n, item in enumerate(items):
+                item = np.array(item)
+                items[n] = list(128 * item / np.mean(item))
         for n, item in enumerate(items):
             self.idx.add_item(n, item)
         self.idx.build(20)
@@ -215,6 +218,10 @@ class Index:
     def mk_idx_cyflann(self, items):
         logging.info("Start building flann index")
         self.idx = self.knn_module.FLANNIndex(algorithm="kdtree")
+        if self.params.fixspeed:
+            for n, item in enumerate(items):
+                item = np.array(item)
+                items[n] = list(128 * item / np.mean(item))
         self.idx.build_index(items)
 
     def idx_get_length_cyflann(self):
@@ -235,7 +242,12 @@ class Index:
         self.idx = self.knn_module.Index(space='l2', dim=index_length)
         self.idx.set_num_threads(multiprocessing.cpu_count())
         self.idx.init_index(max_elements=len(items), ef_construction=100, M=index_length)
-        self.idx.add_items(np.array(items))
+        items = np.array(items)
+        if self.params.fixspeed:
+            for n, item in enumerate(items):
+                items[n] = 128.0*item/np.mean(item)
+
+        self.idx.add_items(items)
         self.__items = items
 
     def idx_get_length_hnswlib(self):
@@ -635,7 +647,7 @@ if __name__ == "__main__":
     parser.add_argument("--ignore_end",
                         type=int,
                         default=0,
-                        help="Ignore search results startingstartin in the last"
+                        help="Ignore search results starting in the last"
                         " seconds of a movie, default 0")
     parser.add_argument("--db",
                         help="SQLITE3 database file")
@@ -693,6 +705,11 @@ if __name__ == "__main__":
                         default=False,
                         action="store_true",
                         help=argparse.SUPPRESS)
+    parser.add_argument("--fixspeed",
+                        default=False,
+                        action="store_true",
+                        help="Make search more robust for time-scaled videos, "
+                        "increase indexlength to reduce number of false positives")
     parser.add_argument("--fixfilenames",
                         default=False,
                         action="store_true",
