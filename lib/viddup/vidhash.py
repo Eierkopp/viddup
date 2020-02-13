@@ -31,8 +31,8 @@ import numpy as np
 
 from imageio import formats
 from imageio.core import (Format, get_remote_file, string_types, read_n_bytes,
-                        image_as_uint, get_platform, CannotReadFrameError,
-                        InternetNotAllowedError, NeedDownloadError)
+                          image_as_uint, get_platform, CannotReadFrameError,
+                          InternetNotAllowedError, NeedDownloadError)
 
 FNAME_PER_PLATFORM = {
     'osx32': 'ffmpeg-osx-v3.2.4',
@@ -388,17 +388,16 @@ class VidHashFormat(Format):
                 iargs = []
             # Output args, for writing to pipe
             oargs = ['-vf',
-                         'crop=in_w/10:in_h/10:in_w*0.45:in_h*0.45',
-                         #'crop=20:20:in_w/2-10:in_h/2-10',
-                         '-f', 'image2pipe',
-                        '-pix_fmt', self._pix_fmt,
-                        '-vcodec', 'rawvideo']
+                     'crop=in_w/10:in_h/10:in_w*0.45:in_h*0.45',
+                     '-f', 'image2pipe',
+                     '-pix_fmt', self._pix_fmt,
+                     '-vcodec', 'rawvideo']
             oargs.extend(['-s', self._arg_size] if self._arg_size else [])
             # Create process
             cmd = [self._exe] + self._arg_ffmpeg_params
             cmd += iargs + ['-i', self._filename] + oargs + ['-']
             self._proc = sp.Popen(cmd, stdin=sp.PIPE,
-                                      stdout=sp.PIPE, stderr=sp.PIPE)
+                                  stdout=sp.PIPE, stderr=sp.PIPE)
             # Create thread that keeps reading from stderr
             self._stderr_catcher = StreamCatcher(self._proc.stderr)
 
@@ -508,7 +507,7 @@ class VidHashFormat(Format):
             line = videolines[0]
 
             # get the frame rate
-            matches = re.findall(" ([0-9]+\.?[0-9]*) (tbr|fps)", line)
+            matches = re.findall(r" ([0-9]+\.?[0-9]*) (tbr|fps)", line)
             fps = 0
             if matches:  # Can be empty, see #171, assume nframes = inf
                 fps = float(matches[0][0].strip())
@@ -926,5 +925,7 @@ def get_output_video_line(lines):
 
 
 # Register. You register an *instance* of a Format class.
-format = VidHashFormat('vidhash', 'Many video formats and cameras (via ffmpeg)', '.mov .avi .mpg .mpeg .mp4 .mkv .wmv', 'I')
+format = VidHashFormat('vidhash',
+                       'Many video formats and cameras (via ffmpeg)',
+                       '.mov .avi .mpg .mpeg .mp4 .mkv .wmv', 'I')
 formats.add_format(format)

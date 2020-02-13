@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+# coding: utf-8
 
 import argparse
 from itertools import combinations
@@ -20,13 +21,14 @@ from collections import namedtuple
 import warnings
 import yaml
 
-from viddup import get_db
+from viddup import get_db, FileInfo  # noqa: F401  FileInfo needed by yaml Loader
+from viddup import vidhash  # noqa: F401  importing registers format with imageio
 
 import gi.repository
 gi.require_version('Gtk', '3.0')  # noqa: E402
 from gi.repository import Gtk, GLib
 
-NCOLS = 70
+NCOLS = 70  # columns for progress bar
 
 
 class TqdmStream:
@@ -144,7 +146,7 @@ class Index:
     def is_whitelisted(self, ids):
         """Return True, if all pairs of filenames are whitelisted"""
         for id1, id2 in combinations(ids, 2):
-            if not dbi.is_whitelisted(id1, id2):
+            if not self.dbi.is_whitelisted(id1, id2):
                 return False
         return True
 
@@ -319,33 +321,32 @@ def get_extrema(hashes, min_dist, fps):
 def import_file(dbi, params, fname):
     """Compute and import hashes of the given filename into the database"""
     start_time = time.time()
-    try:
-        if dbi.is_name_in_db(fname):
-            if not params.refresh:
-                logging.info("File %s already imported", fname)
-                return
+    with dbi.transaction() as conn:
+        try:
+            if dbi.is_name_in_db(fname):
+                if not params.refresh:
+                    logging.info("File %s already imported", fname)
+                    return
 
-        index_info, fps, duration, brightness = get_hashes(fname,
-                                                           params.fixduration)
+            index_info, fps, duration, brightness = get_hashes(fname,
+                                                               params.fixduration)
 
-        fi = dbi.insert_file(fname, fps, duration)
+            fi = dbi.insert_file(fname, fps, duration)
 
-        dbi.insert_hashes(fi.fid, index_info)
+            dbi.insert_hashes(fi.fid, index_info)
 
-        dbi.insert_brightness(fi.fid, brightness)
+            dbi.insert_brightness(fi.fid, brightness)
 
-        dbi.commit()
-        logging.info("File %s imported in %s",
-                     fname,
-                     format_duration(time.time() - start_time))
+            conn.commit()
+            logging.info("File %s imported in %s",
+                         fname,
+                         format_duration(time.time() - start_time))
 
-    except KeyboardInterrupt:
-        logging.warning("Aborted")
-        raise
-    except Exception:
-        logging.warning("Failed to insert hashes for %s", fname, exc_info=True)
-    finally:
-        dbi.rollback()
+        except KeyboardInterrupt:
+            logging.warning("Aborted")
+            raise
+        except Exception:
+            logging.warning("Failed to insert hashes for %s", fname, exc_info=True)
 
 
 def handle_purge(dbi, params, do_delete=None):
@@ -379,29 +380,29 @@ def whitelist(dbi, params, files=None):
     if files is None:
         files = params.whitelist
 
-    ids = set()
-    for f in files:
-        fid = dbi.get_id(f)
-        if fid is not None:
-            ids.add(Entry._make([f, fid]))
-        else:
-            logging.warn("File %s not found in DB", f)
+    with dbi.transaction() as conn:
+        ids = set()
+        for f in files:
+            fid = dbi.get_id(f)
+            if fid is not None:
+                ids.add(Entry._make([f, fid]))
+            else:
+                logging.warn("File %s not found in DB", f)
 
-    if len(ids) < 2:
-        logging.warning("Need at least two files to whitelist")
-        return
+        if len(ids) < 2:
+            logging.warning("Need at least two files to whitelist")
+            return
 
-    retval = []
-    for f1, f2 in combinations(list(ids), 2):
-        try:
-            dbi.whitelist(f1.fid, f2.fid)
-            dbi.commit()
-            retval.append((f1, f2))
-            logging.info("Whitelisted %s and %s" % (f1.name, f2.name))
-        except Exception:
-            logging.error("Failed to whitelist pair %s - %s", f1.name, f2.name, exc_info=False)
-            dbi.rollback()
-    return retval
+        retval = []
+        for f1, f2 in combinations(list(ids), 2):
+            try:
+                dbi.whitelist(f1.fid, f2.fid)
+                conn.commit()
+                retval.append((f1, f2))
+                logging.info("Whitelisted %s and %s" % (f1.name, f2.name))
+            except Exception:
+                logging.error("Failed to whitelist pair %s - %s", f1.name, f2.name, exc_info=False)
+        return retval
 
 
 def format_duration(seconds):
@@ -545,12 +546,37 @@ def handle_search(dbi, params):
             logging.info("Group of %d files found", len(match))
             for row in match:
                 fileinfo, offset = row
-                logging.info("ffplay -ss %s '%s'", format_duration(offset), fileinfo.name)
+                logging.info("ffplay -ss %s '%s'",
+                             format_duration(offset), fileinfo.name)
+
+
+def fetch_duplicates(dbi, f):
+    candidates = yaml.load(f, Loader=yaml.Loader)
+    result = []
+    for row in candidates:
+        new_row = []
+        for fi, pos in row:
+            if os.access(fi.name, os.R_OK):
+                new_row.append([fi, pos])
+        if len(new_row) < 2:
+            continue
+
+        fids = [fi[0].fid for fi in new_row]
+        fids.sort()
+        is_whitelisted = True
+        for id1, id2 in combinations(fids, 2):
+            if not dbi.is_whitelisted(id1, id2):
+                is_whitelisted = False
+                break
+        if not is_whitelisted:
+            result.append(new_row)
+
+    return result
 
 
 def handle_searchres(dbi, params):
     with open(params.searchres) as f:
-        duplicates = yaml.load(f)
+        duplicates = fetch_duplicates(dbi, f)
 
     if params.ui:
         ui = VidDupUI(dbi, params, duplicates)
