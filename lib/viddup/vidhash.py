@@ -875,7 +875,7 @@ class StreamCatcher(threading.Thread):
         # Wait?
         if timeout > 0:
             etime = time.time() + timeout
-            while self.isAlive() and time.time() < etime:  # pragma: no cover
+            while self.is_alive() and time.time() < etime:  # pragma: no cover
                 time.sleep(0.01)
         # Return str
         lines = b'\n'.join(self._lines)

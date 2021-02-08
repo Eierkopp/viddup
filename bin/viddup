@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# coding: utf-8
+# -*- coding: utf-8 -*-
 
 import argparse
 from itertools import combinations
@@ -26,7 +26,7 @@ from viddup import vidhash  # noqa: F401  importing registers format with imagei
 
 import gi.repository
 gi.require_version('Gtk', '3.0')  # noqa: E402
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, GLib  # noqa: E402
 
 NCOLS = 70  # columns for progress bar
 
@@ -268,9 +268,14 @@ class Index:
 def get_files(basedir, vid_ext):
     for root, _, files in os.walk(basedir):
         for f in files:
+            now = time.time()
             _, ext = os.path.splitext(f)
             if ext.lower().lstrip(".") in vid_ext:
-                yield os.path.abspath(os.path.join(root, f))
+                fname = os.path.abspath(os.path.join(root, f))
+                # touch files only if they are old enough
+                statres = os.stat(fname)
+                if now - statres.st_mtime > 3600:
+                    yield fname
 
 
 def fix_duration(vidname):
@@ -339,6 +344,10 @@ def import_file(dbi, params, fname):
                 if not params.refresh:
                     logging.info("File %s already imported", fname)
                     return
+
+            # make sure disks have spun up
+            with open(fname) as f:
+                f.read(1024)
 
             index_info, fps, duration, brightness = get_hashes(fname,
                                                                params.fixduration)
