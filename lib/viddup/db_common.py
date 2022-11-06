@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from contextlib import contextmanager
 from collections import namedtuple
 
@@ -52,9 +53,11 @@ class DBBase(object):
         self.conn.rollback()
 
     @contextmanager
-    def transaction(self, policy="collback"):
-        yield self.conn
-        self.rollback() if policy == "rollback" else self.commit()
+    def transaction(self, policy="rollback"):
+        try:
+            yield self.conn
+        finally:
+            self.rollback() if policy == "rollback" else self.commit()
 
     def is_name_in_db(self, fname):
         fid = self.get_id(fname)

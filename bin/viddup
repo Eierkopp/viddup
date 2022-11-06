@@ -337,16 +337,18 @@ def get_extrema(hashes, min_dist, fps):
 
 def import_file(dbi, params, fname):
     """Compute and import hashes of the given filename into the database"""
+    with dbi.transaction():
+        if dbi.is_name_in_db(fname):
+            if not params.refresh:
+                logging.info("File %s already imported", fname)
+                return
+
     start_time = time.time()
     with dbi.transaction() as conn:
         try:
-            if dbi.is_name_in_db(fname):
-                if not params.refresh:
-                    logging.info("File %s already imported", fname)
-                    return
 
             # make sure disks have spun up
-            with open(fname) as f:
+            with open(fname, "rb") as f:
                 f.read(1024)
 
             index_info, fps, duration, brightness = get_hashes(fname,
