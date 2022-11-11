@@ -19,6 +19,7 @@ def mk_stmt(db_mod):
         "INSERT_BRIGHTNESS": "insert into brightness (filename_id, brightness) values (%%, %%)",
         "GET_BRIGHTNESS": "select brightness from brightness where filename_id = %%",
         "UPDATE_FILE": "update filenames set name=%%, fps=%%, duration=%% where id=%%",
+        "UPDATE_FILE_NAME": "update filenames set name=%% where id=%%",
         "GET_FILE_ID": "select id from filenames where name=%%",
         "DEL_FILE": "delete from filenames where id=%%",
         "INSERT_WHITELIST": "insert into whitelist values (%%,%%)",
@@ -83,6 +84,10 @@ class DBBase(object):
             c.execute(self.s["DELETE_HASHES"], [fid])
             for f, h in index_info:
                 c.execute(self.s["INSERT_HASHES"], [fid, f, h])
+
+    def update_name(self, fid, name):
+        with self.cursor() as c:
+            c.execute(self.s["UPDATE_FILE_NAME"], [name, fid])
 
     def get_hashes(self, fid, min_frame, max_frame):
         with self.cursor() as c:

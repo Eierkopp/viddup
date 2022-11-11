@@ -624,6 +624,28 @@ def fixfilenames(args):
             os.rename(fname, new_fname)
 
 
+def fix_moved_files(dbi, args):
+    logging.info("scanning for moved files")
+    file_infos = dbi.get_file_infos()
+    basenames = dict()
+    duplicates = set()
+    for fi in file_infos:
+        bn = os.path.basename(fi.name)
+        if bn in basenames:
+            duplicates.add(bn)
+            logging.info("ambiguous basename for %s", bn)
+        basenames[bn] = fi.fid
+    for bn in duplicates:
+        del basenames[bn]
+    with dbi.transaction() as conn:
+        for fname in get_files(args.dir, args.vidext.replace(" ", "").split(",")):
+            bn = os.path.basename(fname)
+            if bn in basenames:
+                logging.info("Move detected: %s => %s", basenames[bn], fname)
+                dbi.update_name(basenames[bn], fname)
+        conn.commit()
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -716,6 +738,10 @@ if __name__ == "__main__":
                         default=False,
                         action="store_true",
                         help=argparse.SUPPRESS)
+    parser.add_argument("--fixrenames",
+                        default=False,
+                        action="store_true",
+                        help="try to fix database filenames for moved files")
     parser.add_argument("--fixspeed",
                         default=False,
                         action="store_true",
@@ -758,6 +784,15 @@ if __name__ == "__main__":
             fixfilenames(params)
         else:
             logging.error("please set --dir option as well")
+            sys.exit(1)
+
+    if params.fixrenames:
+        if params.dir:
+            fix_moved_files(dbi, params)
+            sys.exit(0)
+        else:
+            logging.error("please set --dir option as well")
+            sys.exit(1)
 
     if params.whitelist:
         whitelist(dbi, params)
