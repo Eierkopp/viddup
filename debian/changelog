@@ -1,3 +1,9 @@
+viddup (1.3) unstable; urgency=low
+
+  * file movement support added
+
+ -- Depperter Depp <depp@eierkopp.ddnss.org>  Fri, 11 Nov 2022 10:16:00 +0100
+
 viddup (1.2) unstable; urgency=low
 
   * fix database lock
