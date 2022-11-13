@@ -387,7 +387,8 @@ class VidHashFormat(Format):
             else:
                 iargs = []
             # Output args, for writing to pipe
-            oargs = ['-vf',
+            oargs = ['-an',
+                     '-vf',
                      'crop=in_w/10:in_h/10:in_w*0.45:in_h*0.45',
                      '-f', 'image2pipe',
                      '-pix_fmt', self._pix_fmt,
@@ -924,8 +925,10 @@ def get_output_video_line(lines):
                 return line
 
 
+NAME = "vidhash"
+
 # Register. You register an *instance* of a Format class.
-format = VidHashFormat('vidhash',
+format = VidHashFormat(NAME,
                        'Many video formats and cameras (via ffmpeg)',
                        '.mov .avi .mpg .mpeg .mp4 .mkv .wmv', 'I')
 formats.add_format(format)

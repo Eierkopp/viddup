@@ -3,7 +3,6 @@
 
 import argparse
 from itertools import combinations
-import importlib
 import logging
 import os
 import subprocess
@@ -16,13 +15,13 @@ from scipy.signal import argrelmax
 import numpy as np
 import cProfile
 import pstats
-import multiprocessing
 from collections import namedtuple
+from typing import Iterable, IO, List, Tuple, Optional
 import warnings
 import yaml
 
-from viddup import get_db, FileInfo  # noqa: F401  FileInfo needed by yaml Loader
-from viddup import vidhash  # noqa: F401  importing registers format with imageio
+from viddup import DB, get_db, FileInfo, get_index, installed_knn_libs  # noqa: F401  FileInfo needed by yaml Loader
+from viddup import vidhash
 
 import gi.repository
 gi.require_version('Gtk', '3.0')  # noqa: E402
@@ -36,7 +35,7 @@ class TqdmStream:
     def __init__(self, stream):
         self.stream = stream
 
-    def write(self, data):
+    def write(self, data: str) -> None:
         data = data.rstrip("\r\n")
         if data:
             tqdm.write(data, file=self.stream)
@@ -47,12 +46,12 @@ log_stream = TqdmStream(sys.stdout)
 
 
 # send warnings to log stream
-def warn_msg_impl(msg):
-    text = warnings._formatwarnmsg(msg)
+def showwarning(message, category, filename, lineno, file=None, line=None):
+    text = warnings.formatwarning(message, category, filename, lineno, line)
     log_stream.write(text)
 
 
-warnings._showwarnmsg_impl = warn_msg_impl
+warnings.showwarning = showwarning
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)-15s;%(levelname)s;%(message)s',
@@ -60,212 +59,9 @@ logging.basicConfig(level=logging.INFO,
 
 KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts, asf, wmv"
 INDEX_DIST = 10  # seconds
-ANN_LIBS = []
-
-for module_name in ["hnswlib", "cyflann", "annoy"]:
-    try:
-        importlib.import_module(module_name)
-        ANN_LIBS.append(module_name)
-    except ModuleNotFoundError:
-        pass
-
-if not ANN_LIBS:
-    logging.error("Please install at least one of the k-nearest neighbor "
-                  "libraries: hnswlib, cyflann, or annoy")
-    sys.exit(1)
 
 
-class Index:
-
-    def __init__(self, dbi, params):
-        logging.info("Using knn library %s", params.knnlib)
-        self.dbi = dbi
-        self.params = params
-        self.knn_module = importlib.import_module(params.knnlib)
-
-        self.mk_index = getattr(self, "mk_idx_%s" % params.knnlib)
-        self.idx_get_nn = getattr(self, "idx_get_nn_%s" % params.knnlib)
-        self.idx_get_length = getattr(self, "idx_get_length_%s" % params.knnlib)
-        self.idx_get_row = getattr(self, "idx_get_row_%s" % params.knnlib)
-
-        self.init_index()
-
-    def search(self):
-        logging.info("Searching duplicates")
-        radius = self.params.radius
-        step = self.params.step
-        debug = self.params.debug
-        data_length = self.idx_get_length()
-
-        known_duplicates = set()
-        result = []
-
-        for i in tqdm(range(0, data_length, step), ascii=True, ncols=NCOLS):
-            elem_idx = self.idx_get_nn(i, radius)
-            elem_idx.sort()
-            if len(elem_idx) > 1:
-                details = []
-
-                fids = [self.fi_list[i].fid for i in elem_idx]
-                fids.sort()
-
-                pairs = list(combinations(fids, 2))
-
-                for pair in pairs[:]:
-                    if pair[0] == pair[1] or pair in known_duplicates or self.is_whitelisted(pair):
-                        known_duplicates.add(pair)
-                        pairs.remove(pair)
-                fids = set(i[0] for i in pairs).union(i[1] for i in pairs)
-                if not fids:
-                    continue
-
-                known_duplicates.update(set(pairs))
-                known_fids = set()
-                for n, item in enumerate(elem_idx):
-                    try:
-                        fid = self.fi_list[item].fid
-                        if fid not in fids or fid in known_fids:
-                            continue
-                        known_fids.add(fid)
-                        fileinfo, frame = self.fi_list[item], self.frame_list[item]
-                        if debug:
-                            logging.info("%4d, %-50s: %s",
-                                         fileinfo.fid,
-                                         fileinfo.name[-50:],
-                                         self.idx_get_row(item))
-                        details.append([fileinfo, frame/fileinfo.fps])
-                    except KeyboardInterrupt:
-                        raise
-                    except Exception:
-                        logging.info("Error processing: %s, purge required?", item, exc_info=True)
-                if len(details) > 1:
-                    result.append(details)
-        return result
-
-    def is_whitelisted(self, ids):
-        """Return True, if all pairs of filenames are whitelisted"""
-        for id1, id2 in combinations(ids, 2):
-            if not self.dbi.is_whitelisted(id1, id2):
-                return False
-        return True
-
-    def init_index(self):
-        logging.info("Loading hashes")
-        self.fi_list = []    # fileinfo for item
-        self.frame_list = []  # first frame for item
-        items = []
-
-        index_length = self.params.indexlength
-        scene_seconds = self.params.scenelength
-        ignore_start = self.params.ignore_start
-        ignore_end = self.params.ignore_end
-
-        with tqdm(self.dbi.get_file_infos(), ascii=True, ncols=NCOLS) as progress_bar:
-            for fileinfo in progress_bar:
-                min_frame = int(ignore_start * fileinfo.fps)
-                max_frame = int((fileinfo.duration - ignore_end) * fileinfo.fps)
-
-                frames, hashes = dbi.get_hashes(fileinfo.fid, min_frame, max_frame)
-                if len(hashes) < 5:  # ignore fid, if list of hashes is too short
-                    continue
-
-                item_count = max(0, len(hashes) - index_length)
-
-                for i in range(item_count):
-                    item = hashes[i:i+index_length]
-                    total_time = 0
-                    for n, v in enumerate(item):
-                        if total_time > scene_seconds:
-                            item[n] = 0.0
-                        total_time += v
-                    items.append(item)
-                    self.fi_list.append(fileinfo)
-                    self.frame_list.append(frames[i])
-
-        self.mk_index(items)
-
-    # annoy support, c.f. https://github.com/spotify/annoy
-    def mk_idx_annoy(self, items):
-        logging.info("Start building annoy index")
-        self.idx = self.knn_module.AnnoyIndex(self.params.indexlength,
-                                              metric="euclidean")
-        if self.params.fixspeed:
-            for n, item in enumerate(items):
-                item = np.array(item)
-                items[n] = list(128 * item / np.mean(item))
-        for n, item in enumerate(items):
-            self.idx.add_item(n, item)
-        self.idx.build(20)
-
-    def idx_get_length_annoy(self):
-        return self.idx.get_n_items()
-
-    def idx_get_nn_annoy(self, rownum, radius):
-        result = []
-        count = 20
-        elem_idx, elem_dists = self.idx.get_nns_by_item(rownum,
-                                                        count,
-                                                        include_distances=True)
-        for n, item in enumerate(elem_idx):
-            if elem_dists[n] < radius:
-                result.append(item)
-        return result
-
-    def idx_get_row_annoy(self, rownum):
-        return self.idx.get_item_vector(rownum)
-
-    # flann support, c.f. https://github.com/dougalsutherland/cyflann
-    def mk_idx_cyflann(self, items):
-        logging.info("Start building flann index")
-        self.idx = self.knn_module.FLANNIndex(algorithm="kdtree")
-        if self.params.fixspeed:
-            for n, item in enumerate(items):
-                item = np.array(item)
-                items[n] = list(128 * item / np.mean(item))
-        self.idx.build_index(items)
-
-    def idx_get_length_cyflann(self):
-        return len(self.idx.data)
-
-    def idx_get_nn_cyflann(self, rownum, radius):
-        row = self.idx.data[rownum]
-        elem_idx, _ = self.idx.nn_radius(row, radius, sorted=True)
-        return elem_idx
-
-    def idx_get_row_cyflann(self, rownum):
-        return self.idx.data[rownum]
-
-    # hnswlib support, c.f. https://github.com/nmslib/hnsw
-    def mk_idx_hnswlib(self, items):
-        logging.info("Start building hnswlib index")
-        index_length = self.params.indexlength
-        self.idx = self.knn_module.Index(space='l2', dim=index_length)
-        self.idx.set_num_threads(multiprocessing.cpu_count())
-        self.idx.init_index(max_elements=len(items), ef_construction=100, M=index_length)
-        items = np.array(items)
-        if self.params.fixspeed:
-            for n, item in enumerate(items):
-                items[n] = 128.0*item/np.mean(item)
-
-        self.idx.add_items(items)
-        self.__items = items
-
-    def idx_get_length_hnswlib(self):
-        return len(self.__items)
-
-    def idx_get_nn_hnswlib(self, rownum, radius):
-        result = []
-        elem_idx, elem_dists = self.idx.knn_query(self.__items[rownum], k=20)
-        for n, item in enumerate(elem_idx[0]):
-            if elem_dists[0][n] < radius:
-                result.append(item)
-        return result
-
-    def idx_get_row_hnswlib(self, rownum):
-        return self.__items[rownum]
-
-
-def get_files(basedir, vid_ext):
+def get_files(basedir: str, vid_ext: Iterable[str]):
     for root, _, files in os.walk(basedir):
         for f in files:
             now = time.time()
@@ -274,11 +70,11 @@ def get_files(basedir, vid_ext):
                 fname = os.path.abspath(os.path.join(root, f))
                 # touch files only if they are old enough
                 statres = os.stat(fname)
-                if now - statres.st_mtime > 3600:
+                if now - statres.st_mtime > 36:
                     yield fname
 
 
-def fix_duration(vidname):
+def fix_duration(vidname: str) -> None:
     wd = os.path.dirname(vidname)
     if os.access(vidname, os.W_OK) and os.access(wd, os.W_OK):
         with open(vidname, "rb") as f:
@@ -291,8 +87,8 @@ def fix_duration(vidname):
         logging.warning("target %s is not writable, giving up", vidname)
 
 
-def get_hashes(vidname, fix=True):
-    video = imageio.get_reader(vidname, "vidhash")
+def get_hashes(vidname, fix=True) -> Tuple[List[Tuple[int, float]], float, float, List[float]]:
+    video = imageio.get_reader(vidname, vidhash.NAME)
     md = video.get_meta_data()
     fps = md["fps"]
     nframes = md["nframes"]
@@ -321,7 +117,7 @@ def get_hashes(vidname, fix=True):
     return extrema, fps, duration, brightness
 
 
-def get_extrema(hashes, min_dist, fps):
+def get_extrema(hashes: List[float], min_dist: float, fps: float) -> List[Tuple[int, float]]:
     """Take the list of brightness values per frame and compute
     a list of pairs (frame number and local maximum)"""
 
@@ -335,36 +131,35 @@ def get_extrema(hashes, min_dist, fps):
     return result
 
 
-def import_file(dbi, params, fname):
+def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
     """Compute and import hashes of the given filename into the database"""
-    with dbi.transaction():
-        if dbi.is_name_in_db(fname):
+    with dbi.getconn() as conn:
+        if dbi.is_name_in_db(conn, fname):
             if not params.refresh:
                 logging.info("File %s already imported", fname)
                 return
 
     start_time = time.time()
-    with dbi.transaction() as conn:
+    with dbi.getconn() as conn:
         try:
 
             # make sure disks have spun up
             with open(fname, "rb") as f:
                 f.read(1024)
 
-            index_info, fps, duration, brightness = get_hashes(fname,
-                                                               params.fixduration)
+            index_info, fps, duration, brightness = get_hashes(fname, params.fixduration)
 
-            fi = dbi.insert_file(fname, fps, duration)
+            fi = dbi.insert_file(conn, fname, fps, duration)
 
-            dbi.insert_hashes(fi.fid, index_info)
+            dbi.insert_hashes(conn, fi.fid, index_info)
 
-            dbi.insert_brightness(fi.fid, brightness)
+            dbi.insert_brightness(conn, fi.fid, brightness)
 
             conn.commit()
             logging.info("File %s imported in %s",
                          fname,
                          format_duration(time.time() - start_time))
-
+            conn.commit()
         except KeyboardInterrupt:
             logging.warning("Aborted")
             raise
@@ -372,41 +167,46 @@ def import_file(dbi, params, fname):
             logging.warning("Failed to insert hashes for %s", fname, exc_info=True)
 
 
-def handle_purge(dbi, params, do_delete=None):
+def handle_purge(dbi: DB, params: argparse.Namespace, do_delete: Optional[bool] = None) -> None:
 
     if do_delete is None:
         do_delete = params.delete
 
-    del_files = []
-    fn_fis = []
-    for fi in dbi.get_file_infos():
-        fn_fis.append(fi.fid)
-        if not os.access(fi.name, os.R_OK):
-            del_files.append(fi)
+    with dbi.getconn() as conn:
 
-    logging.warning("Need to delete %d of %d files",
-                    len(del_files),
-                    len(fn_fis))
-    if do_delete:
-        for fi in del_files:
-            logging.info("deleting %s", fi.name)
-            dbi.del_file(fi.fid)
-    else:
-        for fi in del_files:
-            logging.info(fi.name)
+        dbi.tidy_db(conn)
+
+        del_files = []
+        fn_fis = []
+        for fi in dbi.get_file_infos(conn):
+            fn_fis.append(fi.fid)
+            if not os.access(fi.name, os.R_OK):
+                del_files.append(fi)
+
+        logging.warning("Need to delete %d of %d files",
+                        len(del_files),
+                        len(fn_fis))
+        if do_delete:
+            for fi in del_files:
+                logging.info("deleting %s", fi.name)
+                dbi.del_file(conn, fi.fid)
+        else:
+            for fi in del_files:
+                logging.info(fi.name)
+        conn.commit()
 
 
-def whitelist(dbi, params, files=None):
+def whitelist(dbi: DB, params: argparse.Namespace, files: Optional[List[str]] = None) -> None:
 
     Entry = namedtuple("Entry", "name, fid")
 
     if files is None:
         files = params.whitelist
 
-    with dbi.transaction() as conn:
+    with dbi.getconn() as conn:
         ids = set()
         for f in files:
-            fid = dbi.get_id(f)
+            fid = dbi.get_id(conn, f)
             if fid is not None:
                 ids.add(Entry._make([f, fid]))
             else:
@@ -416,19 +216,16 @@ def whitelist(dbi, params, files=None):
             logging.warning("Need at least two files to whitelist")
             return
 
-        retval = []
         for f1, f2 in combinations(list(ids), 2):
             try:
-                dbi.whitelist(f1.fid, f2.fid)
+                dbi.whitelist(conn, f1.fid, f2.fid)
                 conn.commit()
-                retval.append((f1, f2))
                 logging.info("Whitelisted %s and %s" % (f1.name, f2.name))
             except Exception:
                 logging.error("Failed to whitelist pair %s - %s", f1.name, f2.name, exc_info=False)
-        return retval
 
 
-def format_duration(seconds):
+def format_duration(seconds: float) -> str:
     return time.strftime("%H:%M:%S", time.gmtime(seconds))
 
 
@@ -540,7 +337,7 @@ class VidDupUI(object):
         return format_duration(fileinfo.duration) + " " + fileinfo.name
 
 
-def handle_import(dbi, params):
+def handle_import(dbi: DB, params: argparse.Namespace) -> None:
     if params.dir:
         for fname in get_files(params.dir,
                                params.vidext.replace(" ", "").split(",")):
@@ -549,9 +346,10 @@ def handle_import(dbi, params):
         import_file(dbi, params, params.file)
 
 
-def handle_search(dbi, params):
-    idx = Index(dbi, params)
-    duplicates = idx.search()
+def handle_search(dbi: DB, params: argparse.Namespace) -> None:
+    idx = get_index(dbi, params)
+    with dbi.getconn() as conn:
+        duplicates = idx.search(conn)
 
     if len(duplicates) == 0:
         logging.info("No candidates found, giving up")
@@ -573,31 +371,32 @@ def handle_search(dbi, params):
                              format_duration(offset), fileinfo.name)
 
 
-def fetch_duplicates(dbi, f):
+def fetch_duplicates(dbi: DB, f: IO) -> List[List[Tuple[FileInfo, float]]]:
     candidates = yaml.load(f, Loader=yaml.Loader)
     result = []
-    for row in candidates:
-        new_row = []
-        for fi, pos in row:
-            if os.access(fi.name, os.R_OK):
-                new_row.append([fi, pos])
-        if len(new_row) < 2:
-            continue
+    with dbi.getconn() as conn:
+        for row in candidates:
+            new_row = []
+            for fi, pos in row:
+                if os.access(fi.name, os.R_OK):
+                    new_row.append((fi, pos))
+            if len(new_row) < 2:
+                continue
 
-        fids = [fi[0].fid for fi in new_row]
-        fids.sort()
-        is_whitelisted = True
-        for id1, id2 in combinations(fids, 2):
-            if not dbi.is_whitelisted(id1, id2):
-                is_whitelisted = False
-                break
-        if not is_whitelisted:
-            result.append(new_row)
+            fids = [fi[0].fid for fi in new_row]
+            fids.sort()
+            is_whitelisted = True
+            for id1, id2 in combinations(fids, 2):
+                if not dbi.is_whitelisted(conn, id1, id2):
+                    is_whitelisted = False
+                    break
+            if not is_whitelisted:
+                result.append(new_row)
 
     return result
 
 
-def handle_searchres(dbi, params):
+def handle_searchres(dbi: DB, params: argparse.Namespace) -> None:
     with open(params.searchres) as f:
         duplicates = fetch_duplicates(dbi, f)
 
@@ -612,7 +411,7 @@ def handle_searchres(dbi, params):
                 logging.info("ffplay -ss %s '%s'", format_duration(offset), fileinfo.name)
 
 
-def fixfilenames(args):
+def fixfilenames(args: argparse.Namespace) -> None:
     for fname in get_files(args.dir, args.vidext.replace(" ", "").split(",")):
         try:
             fname.encode("utf8")
@@ -624,9 +423,10 @@ def fixfilenames(args):
             os.rename(fname, new_fname)
 
 
-def fix_moved_files(dbi, args):
+def fix_moved_files(dbi: DB, args: argparse.Namespace) -> None:
     logging.info("scanning for moved files")
-    file_infos = dbi.get_file_infos()
+    with dbi.getconn() as conn:
+        file_infos = dbi.get_file_infos(conn)
     basenames = dict()
     duplicates = set()
     for fi in file_infos:
@@ -634,15 +434,15 @@ def fix_moved_files(dbi, args):
         if bn in basenames:
             duplicates.add(bn)
             logging.info("ambiguous basename for %s", bn)
-        basenames[bn] = fi.fid
+        basenames[bn] = fi
     for bn in duplicates:
         del basenames[bn]
-    with dbi.transaction() as conn:
+    with dbi.getconn() as conn:
         for fname in get_files(args.dir, args.vidext.replace(" ", "").split(",")):
             bn = os.path.basename(fname)
-            if bn in basenames:
-                logging.info("Move detected: %s => %s", basenames[bn], fname)
-                dbi.update_name(basenames[bn], fname)
+            if bn in basenames and fname != basenames[bn].name:
+                logging.info("Move detected: %s => %s", basenames[bn].fid, fname)
+                dbi.update_name(conn, basenames[bn].fid, fname)
         conn.commit()
 
 
@@ -728,8 +528,8 @@ if __name__ == "__main__":
                         nargs='+',
                         help="Whitelist a list of files")
     parser.add_argument("--knnlib",
-                        default=ANN_LIBS[0],
-                        help="knn library to use, choose " + ", ".join(ANN_LIBS))
+                        default=None,
+                        help="knn library to use, choose " + ", ".join(installed_knn_libs()))
     parser.add_argument("--vidext",
                         default=KNOWN_VID_TYPES_DEFAULT,
                         help="filename extensions to consider,"
@@ -771,13 +571,16 @@ if __name__ == "__main__":
 
     dbi = get_db(params)
 
-    if params.knnlib not in ANN_LIBS:
-        logging.error("Unsupported knn library %s", params.knnlib)
-        sys.exit(1)
-
     if params.profile:
         profile = cProfile.Profile()
         profile.enable()
+
+    if params.fixrenames:
+        if params.dir:
+            fix_moved_files(dbi, params)
+        else:
+            logging.error("please set --dir option as well")
+            sys.exit(1)
 
     if params.fixfilenames:
         if params.dir:
@@ -786,19 +589,10 @@ if __name__ == "__main__":
             logging.error("please set --dir option as well")
             sys.exit(1)
 
-    if params.fixrenames:
-        if params.dir:
-            fix_moved_files(dbi, params)
-            sys.exit(0)
-        else:
-            logging.error("please set --dir option as well")
-            sys.exit(1)
-
     if params.whitelist:
         whitelist(dbi, params)
 
     if params.purge:
-        dbi.tidy_db()
         handle_purge(dbi, params)
 
     if params.dir or params.file:
