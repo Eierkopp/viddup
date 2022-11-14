@@ -9,37 +9,19 @@ import subprocess
 import time
 import sys
 from tqdm import tqdm
-import gi
 import imageio
 from scipy.signal import argrelmax
 import numpy as np
 import cProfile
 import pstats
-from collections import namedtuple
-from typing import Iterable, IO, List, Tuple, Optional
+from typing import Iterable, IO, List, Tuple, Any
 import warnings
 import yaml
 
 from viddup import DB, get_db, FileInfo, get_index, installed_knn_libs  # noqa: F401  FileInfo needed by yaml Loader
 from viddup import vidhash
-
-import gi.repository
-gi.require_version('Gtk', '3.0')  # noqa: E402
-from gi.repository import Gtk, GLib  # noqa: E402
-
-NCOLS = 70  # columns for progress bar
-
-
-class TqdmStream:
-
-    def __init__(self, stream):
-        self.stream = stream
-
-    def write(self, data: str) -> None:
-        data = data.rstrip("\r\n")
-        if data:
-            tqdm.write(data, file=self.stream)
-            self.stream.flush()
+from viddup.tools import format_duration, TqdmStream, NCOLS, whitelist, handle_purge
+from viddup.ui import VidDupUI
 
 
 log_stream = TqdmStream(sys.stdout)
@@ -167,176 +149,6 @@ def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
             logging.warning("Failed to insert hashes for %s", fname, exc_info=True)
 
 
-def handle_purge(dbi: DB, params: argparse.Namespace, do_delete: Optional[bool] = None) -> None:
-
-    if do_delete is None:
-        do_delete = params.delete
-
-    with dbi.getconn() as conn:
-
-        dbi.tidy_db(conn)
-
-        del_files = []
-        fn_fis = []
-        for fi in dbi.get_file_infos(conn):
-            fn_fis.append(fi.fid)
-            if not os.access(fi.name, os.R_OK):
-                del_files.append(fi)
-
-        logging.warning("Need to delete %d of %d files",
-                        len(del_files),
-                        len(fn_fis))
-        if do_delete:
-            for fi in del_files:
-                logging.info("deleting %s", fi.name)
-                dbi.del_file(conn, fi.fid)
-        else:
-            for fi in del_files:
-                logging.info(fi.name)
-        conn.commit()
-
-
-def whitelist(dbi: DB, params: argparse.Namespace, files: Optional[List[str]] = None) -> None:
-
-    Entry = namedtuple("Entry", "name, fid")
-
-    if files is None:
-        files = params.whitelist
-
-    with dbi.getconn() as conn:
-        ids = set()
-        for f in files:
-            fid = dbi.get_id(conn, f)
-            if fid is not None:
-                ids.add(Entry._make([f, fid]))
-            else:
-                logging.warn("File %s not found in DB", f)
-
-        if len(ids) < 2:
-            logging.warning("Need at least two files to whitelist")
-            return
-
-        for f1, f2 in combinations(list(ids), 2):
-            try:
-                dbi.whitelist(conn, f1.fid, f2.fid)
-                conn.commit()
-                logging.info("Whitelisted %s and %s" % (f1.name, f2.name))
-            except Exception:
-                logging.error("Failed to whitelist pair %s - %s", f1.name, f2.name, exc_info=False)
-
-
-def format_duration(seconds: float) -> str:
-    return time.strftime("%H:%M:%S", time.gmtime(seconds))
-
-
-class VidDupUI(object):
-
-    def __init__(self, dbi, params, duplicates):
-        self.dbi = dbi
-        self.params = params
-        self.duplicates = duplicates
-
-    def start(self):
-        self.builder = Gtk.Builder()
-        self.builder.add_from_file("/usr/share/viddup/viddup.glade")
-
-        window = self.builder.get_object("app")
-
-        data_grid = Gtk.Grid()
-        data_grid.insert_column(0)
-        data_grid.insert_column(0)
-        data_grid.insert_column(0)
-        rows = 0
-        for index, group in enumerate(self.duplicates):
-            for row in group:
-                fileinfo, offset = row
-                fn = Gtk.Label(label=self.make_label(fileinfo), xalign=0, xpad=10)
-                row.append(fn)
-                offset = Gtk.Label(label=format_duration(offset), xalign=0, xpad=10)
-                delete = Gtk.Button(label="delete")
-                delete.connect("clicked", self.onDelete, fileinfo.name)
-                data_grid.insert_row(rows)
-                data_grid.attach(fn, 0, rows, 1, 1)
-                data_grid.attach(offset, 1, rows, 1, 1)
-                data_grid.attach(delete, 2, rows, 1, 1)
-                rows += 1
-            box = Gtk.Box(orientation="horizontal")
-            play = Gtk.Button(label="play")
-            play.connect("clicked", self.onPlay, index)
-            box.pack_start(play, expand=False, fill=True, padding=0)
-            whitelist = Gtk.Button(label="whitelist")
-            whitelist.connect("clicked", self.onWhitelist, index)
-            box.pack_start(whitelist, expand=False, fill=True, padding=0)
-            box.pack_end(Gtk.Label(), expand=True, fill=True, padding=0)
-            data_grid.insert_row(rows)
-            data_grid.attach(box, 0, rows, 3, 1)
-            rows += 1
-
-        main_area = self.builder.get_object("main_area")
-        main_area.add(data_grid)
-
-        self.builder.connect_signals(self)
-
-        window.show_all()
-
-        Gtk.main()
-
-    def onPlay(self, *args):
-        index = args[1]
-        procs = []
-        for fileinfo, offset, _ in self.duplicates[index]:
-            if os.access(fileinfo.name, os.R_OK):
-                procs.append(subprocess.Popen(["ffplay", "-sn", "-ss",
-                                               format_duration(offset),
-                                               fileinfo.name],
-                                              stdout=subprocess.DEVNULL,
-                                              stderr=subprocess.DEVNULL))
-
-        finished = not bool(procs)
-        while not finished:
-            for p in procs:
-                if (0, 0) != os.waitpid(p.pid, os.WNOHANG):
-                    finished = True
-                    break
-            time.sleep(0.2)
-
-        for p in procs:
-            try:
-                p.kill()
-            except Exception:
-                pass
-
-    def onWhitelist(self, *args):
-        args[0].destroy()
-        index = args[1]
-        fnames = [d[0].name for d in self.duplicates[index]]
-        whitelist(self.dbi, self.params, fnames)
-
-    def onDelete(self, *args):
-        fname = args[1]
-        try:
-            os.remove(fname)
-            logging.info("Deleted %s", fname)
-            for group in self.duplicates:
-                for fileinfo, offset, label in group:
-                    if fname == fileinfo.name:
-                        label.set_markup("<span strikethrough='true'>%s</span>"
-                                         % GLib.markup_escape_text(self.make_label(fileinfo)))
-                        label.set_use_markup(True)
-        except Exception as e:
-            logging.error("Failed to delete %s: %s", fname, e)
-
-    def onQuit(self, *args):
-        Gtk.main_quit(*args)
-
-    def onPurge(self, *args):
-        switch = self.builder.get_object("delete_switch")
-        handle_purge(self.dbi, self.params, switch.get_active())
-
-    def make_label(self, fileinfo):
-        return format_duration(fileinfo.duration) + " " + fileinfo.name
-
-
 def handle_import(dbi: DB, params: argparse.Namespace) -> None:
     if params.dir:
         for fname in get_files(params.dir,
@@ -371,7 +183,7 @@ def handle_search(dbi: DB, params: argparse.Namespace) -> None:
                              format_duration(offset), fileinfo.name)
 
 
-def fetch_duplicates(dbi: DB, f: IO) -> List[List[Tuple[FileInfo, float]]]:
+def fetch_duplicates(dbi: DB, f: IO) -> List[List[List[Any]]]:
     candidates = yaml.load(f, Loader=yaml.Loader)
     result = []
     with dbi.getconn() as conn:
@@ -379,7 +191,7 @@ def fetch_duplicates(dbi: DB, f: IO) -> List[List[Tuple[FileInfo, float]]]:
             new_row = []
             for fi, pos in row:
                 if os.access(fi.name, os.R_OK):
-                    new_row.append((fi, pos))
+                    new_row.append([fi, pos])
             if len(new_row) < 2:
                 continue
 

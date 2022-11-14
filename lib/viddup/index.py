@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+# -*- coding: utf-8 -*-
 
 from abc import ABC, abstractmethod
 import argparse
@@ -9,9 +10,7 @@ from tqdm import tqdm
 from typing import Iterable, List, Any
 
 from viddup import DB
-
-
-NCOLS = 70
+from .tools import NCOLS
 
 
 class Index(ABC):

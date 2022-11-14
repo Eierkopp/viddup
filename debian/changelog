@@ -1,3 +1,10 @@
+viddup (1.4) unstable; urgency=low
+
+	* refactored
+	* type hints and mypy support
+
+ -- Depperter Depp <depp@eierkopp.ddnss.org>  Mon, 14 Nov 2022 05:25:11 +0100
+
 viddup (1.3) unstable; urgency=low
 
   * file movement support added
