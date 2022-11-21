@@ -27,7 +27,7 @@ from viddup.ui import VidDupUI
 log_stream = TqdmStream(sys.stdout)
 
 
-# send warnings to log stream
+# send imageio warnings to log stream
 def showwarning(message, category, filename, lineno, file=None, line=None):
     text = warnings.formatwarning(message, category, filename, lineno, line)
     log_stream.write(text)
@@ -101,7 +101,7 @@ def get_hashes(vidname, fix=True) -> Tuple[List[Tuple[int, float]], float, float
 
 def get_extrema(hashes: List[float], min_dist: float, fps: float) -> List[Tuple[int, float]]:
     """Take the list of brightness values per frame and compute
-    a list of pairs (frame number and local maximum)"""
+    a list of pairs (frame number and distance[s] of local maxima)"""
 
     order = int(min_dist * fps)
     idx = argrelmax(np.array(hashes), order=order)[0]
@@ -115,6 +115,13 @@ def get_extrema(hashes: List[float], min_dist: float, fps: float) -> List[Tuple[
 
 def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
     """Compute and import hashes of the given filename into the database"""
+
+    if not os.access(fname, os.R_OK):
+        logging.error("File %s not found", fname)
+        return
+
+    fname = os.path.abspath(fname)
+
     with dbi.getconn() as conn:
         if dbi.is_name_in_db(conn, fname):
             if not params.refresh:
@@ -137,7 +144,6 @@ def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
 
             dbi.insert_brightness(conn, fi.fid, brightness)
 
-            conn.commit()
             logging.info("File %s imported in %s",
                          fname,
                          format_duration(time.time() - start_time))
