@@ -54,10 +54,11 @@ def whitelist(dbi: DB, params: argparse.Namespace, files: Optional[List[str]] = 
         for f1, f2 in combinations(list(ids), 2):
             try:
                 dbi.whitelist(conn, f1.fid, f2.fid)
-                conn.commit()
                 logging.info("Whitelisted %s and %s" % (f1.name, f2.name))
+                conn.commit()
             except Exception:
                 logging.error("Failed to whitelist pair %s - %s", f1.name, f2.name, exc_info=False)
+                conn.rollback()
 
 
 def handle_purge(dbi: DB, params: argparse.Namespace, do_delete: Optional[bool] = None) -> None:
