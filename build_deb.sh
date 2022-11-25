@@ -1,9 +1,12 @@
 #!/bin/bash
 
-cd `dirname $0`
+cd "$(dirname $0)" || exit
+
+export MYPYPATH=lib
+mypy bin/viddup
 
 dpkg-parsechangelog
 echo "-----------------------------------------"
 echo "press enter to continue"
-read x
+read -r
 dpkg-buildpackage -b --no-sign

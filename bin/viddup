@@ -269,18 +269,24 @@ def rename_files(dbi: DB, params: argparse.Namespace) -> None:
     old_name, new_name = map(os.path.abspath, params.rename)
     logging.info("Renaming %s -> %s", old_name, new_name)
     if not os.access(old_name, os.R_OK):
-        logging.error("File %s not readable", old_name)
+        logging.error("File %s not readable, ignoring", old_name)
         return
     if os.access(new_name, os.R_OK):
-        logging.error("File %s already exists", new_name)
+        logging.error("File %s already exists, ignoring", new_name)
         return
+    try:
+        with open(new_name, "wb"):
+            os.remove(new_name)
+    except FileNotFoundError:
+        logging.error("File %s is not writable, ignoring", new_name)
+
     os.rename(old_name, new_name)
     with dbi.getconn() as conn:
-        fid = dbi.get_id(conn, old_name)
+        fid = dbi.get_id(conn, str(old_name))
         if not fid:
             logging.warning("File %s not indexed, no DB update needed", old_name)
         else:
-            dbi.update_name(conn, fid, new_name)
+            dbi.update_name(conn, fid, str(new_name))
             conn.commit()
 
 
