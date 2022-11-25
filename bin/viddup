@@ -45,6 +45,7 @@ INDEX_DIST = 10  # seconds
 
 def get_files(basedir: str, vid_ext: Iterable[str]):
     for root, _, files in os.walk(basedir):
+        files.sort()
         for f in files:
             now = time.time()
             _, ext = os.path.splitext(f)
@@ -264,6 +265,25 @@ def fix_moved_files(dbi: DB, args: argparse.Namespace) -> None:
         conn.commit()
 
 
+def rename_files(dbi: DB, params: argparse.Namespace) -> None:
+    old_name, new_name = map(os.path.abspath, params.rename)
+    logging.info("Renaming %s -> %s", old_name, new_name)
+    if not os.access(old_name, os.R_OK):
+        logging.error("File %s not readable", old_name)
+        return
+    if os.access(new_name, os.R_OK):
+        logging.error("File %s already exists", new_name)
+        return
+    os.rename(old_name, new_name)
+    with dbi.getconn() as conn:
+        fid = dbi.get_id(conn, old_name)
+        if not fid:
+            logging.warning("File %s not indexed, no DB update needed", old_name)
+        else:
+            dbi.update_name(conn, fid, new_name)
+            conn.commit()
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -360,6 +380,9 @@ if __name__ == "__main__":
                         default=False,
                         action="store_true",
                         help="try to fix database filenames for moved files")
+    parser.add_argument("--rename",
+                        nargs=2,
+                        help="rename files in filesystem and database")
     parser.add_argument("--fixspeed",
                         default=False,
                         action="store_true",
@@ -399,6 +422,9 @@ if __name__ == "__main__":
         else:
             logging.error("please set --dir option as well")
             sys.exit(1)
+
+    if params.rename:
+        rename_files(dbi, params)
 
     if params.fixfilenames:
         if params.dir:

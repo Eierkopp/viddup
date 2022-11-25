@@ -1,7 +1,13 @@
+viddup (1.5) unstable; urgency=low
+
+  * file renames implemented
+
+ -- Depperter Depp <depp@eierkopp.ddnss.org>  Fri, 25 Nov 2022 09:34:31 +0100
+
 viddup (1.4) unstable; urgency=low
 
-	* refactored
-	* type hints and mypy support
+  * refactored
+  * type hints and mypy support
 
  -- Depperter Depp <depp@eierkopp.ddnss.org>  Mon, 14 Nov 2022 05:25:11 +0100
 
