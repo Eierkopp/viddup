@@ -1,3 +1,9 @@
+viddup (1.6) unstable; urgency=low
+
+  * allow globs in --file 
+
+ -- Depperter Depp <depp@eierkopp.ddnss.org>  Sat, 10 Dec 2022 07:12:11 +0100
+
 viddup (1.5) unstable; urgency=low
 
   * file renames implemented

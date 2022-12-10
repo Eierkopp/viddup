@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import glob
 from itertools import combinations
 import logging
 import os
@@ -162,7 +163,8 @@ def handle_import(dbi: DB, params: argparse.Namespace) -> None:
                                params.vidext.replace(" ", "").split(",")):
             import_file(dbi, params, fname)
     if params.file:
-        import_file(dbi, params, params.file)
+        for f in glob.glob(params.file):
+            import_file(dbi, params, f)
 
 
 def handle_search(dbi: DB, params: argparse.Namespace) -> None:
@@ -308,7 +310,7 @@ if __name__ == "__main__":
     parser.add_argument("--dir",
                         help="Import video hashes from directory and its subdirectories")
     parser.add_argument("--file",
-                        help="Import video hashes for a single file")
+                        help="Import video hashes for a single file or a glob like '*.mp4'")
     parser.add_argument("--refresh",
                         action="store_true",
                         help="Re-hash file but keep whitelistings intact",
@@ -326,15 +328,13 @@ if __name__ == "__main__":
                         default=0,
                         help="Ignore search results starting in the last"
                         " seconds of a movie, default 0")
-    parser.add_argument("--db",
-                        help="SQLITE3 database file")
     parser.add_argument("--dbhost",
                         help="PostgreSQL database server host",
                         default="gateway")
     parser.add_argument("--dbport",
                         type=int,
                         help="PostgreSQL database server port",
-                        default=5433)
+                        default=5432)
     parser.add_argument("--dbname",
                         help="PostgreSQL database name",
                         default="viddup")
