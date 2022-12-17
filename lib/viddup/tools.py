@@ -7,7 +7,7 @@ from itertools import combinations
 import logging
 import os
 import time
-from typing import List, Optional
+from typing import List, Optional, TextIO
 from tqdm import tqdm
 
 from viddup import DB
@@ -17,7 +17,7 @@ NCOLS = 70
 
 class TqdmStream:
 
-    def __init__(self, stream):
+    def __init__(self, stream: TextIO) -> None:
         self.stream = stream
 
     def write(self, data: str) -> None:

@@ -16,13 +16,8 @@ from .tools import NCOLS
 class Index(ABC):
 
     def __init__(self, dbi: DB, params: argparse.Namespace):
-        logging.info("Using knn library %s", params.knnlib)
         self.dbi = dbi
         self.params = params
-        # self.mk_index = getattr(self, "mk_idx_%s" % params.knnlib)
-        # self.idx_get_nn = getattr(self, "idx_get_nn_%s" % params.knnlib)
-        # self.idx_get_length = getattr(self, "idx_get_length_%s" % params.knnlib)
-        # self.idx_get_row = getattr(self, "idx_get_row_%s" % params.knnlib)
         with dbi.getconn() as conn:
             self.init_index(conn)
 
@@ -121,7 +116,7 @@ class Index(ABC):
         self.mk_index(items)
 
     @abstractmethod
-    def mk_index(self, items) -> None:
+    def mk_index(self, items: List[List[float]]) -> None:
         pass
 
     @abstractmethod
@@ -133,5 +128,5 @@ class Index(ABC):
         return list()
 
     @abstractmethod
-    def idx_get_row(self, rownum: int):
+    def idx_get_row(self, rownum: int) -> List[float]:
         pass

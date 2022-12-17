@@ -52,7 +52,7 @@ def get_index(dbi: DB, args: argparse.Namespace) -> Index:
             logging.warning("knnlib %s not installed", args.knnlib)
     else:
         lib = libs[0]
-    logging.info("using knnlib %s", lib)
+    logging.info("Using knnlib %s", lib)
 
     if lib == "annoy":
         from .annoy_index import AnnoyIndex

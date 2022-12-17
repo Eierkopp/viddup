@@ -1,3 +1,10 @@
+viddup (1.6+p1) UNRELEASED; urgency=low
+
+  * more type hints
+  * mymy config
+
+ --  Depperter Depp <depp@eierkopp.ddnss.org>  Sat, 17 Dec 2022 16:15:44 +0100
+
 viddup (1.6) unstable; urgency=low
 
   * allow globs in --file 
