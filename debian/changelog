@@ -1,3 +1,10 @@
+viddup (2.0) unstable; urgency=low
+
+  * handle plateau maxima by using the first frame of the plateau
+  * add --migrate option to hash reprocess brightness if hashes are empty
+
+ --  Depperter Depp <depp@eierkopp.ddnss.org>  Mon, 19 Dec 2022 13:06:32 +0100
+
 viddup (1.6+p1) UNRELEASED; urgency=low
 
   * more type hints
@@ -7,7 +14,7 @@ viddup (1.6+p1) UNRELEASED; urgency=low
 
 viddup (1.6) unstable; urgency=low
 
-  * allow globs in --file 
+  * allow globs in --file
 
  -- Depperter Depp <depp@eierkopp.ddnss.org>  Sat, 10 Dec 2022 07:12:11 +0100
 

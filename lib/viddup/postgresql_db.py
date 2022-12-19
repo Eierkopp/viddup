@@ -89,6 +89,14 @@ class DB:
             c.execute("delete from brightness where filename_id = %s", [fid])
             c.execute("insert into brightness (filename_id, brightness) values (%s, %s)", [fid, brightness])
 
+    def get_brightness(self, conn: Connection, fid: int) -> List[float]:
+        c = conn.execute("select brightness from brightness where filename_id = %s", [fid])
+        data = c.fetchone()
+        if data:
+            return data[0]
+        else:
+            return []
+
     def get_file_infos(self, conn: Connection) -> List[FileInfo]:
         with conn.cursor() as c:
             c.execute("select id, name, fps, duration from filenames order by id asc")
@@ -131,6 +139,11 @@ class DB:
         frames = [p[0] for p in result]
         hashes = [p[1] for p in result]
         return frames, hashes
+
+    def has_hashes(self, conn: Connection, fid: int) -> bool:
+        with conn.cursor() as c:
+            c.execute("select frame from hashes where filename_id = %s limit 1", [fid])
+            return len(c.fetchall()) > 0
 
     def is_whitelisted(self, conn: Connection, id1: int, id2: int) -> bool:
         if id1 > id2:

@@ -105,7 +105,17 @@ def get_extrema(hashes: List[float], min_dist: float, fps: float) -> List[Tuple[
     """Take the list of brightness values per frame and compute
     a list of pairs (frame number and distance[s] of local maxima)"""
 
-    order = int(min_dist * fps)
+    order = round(min_dist * fps)
+
+    # in case of frames with equal brightness, use the first and set the rest to 0
+    brightness = 0.0
+    frames = len(hashes)
+    for i in range(frames):
+        if hashes[i] == brightness:
+            hashes[i] = 0.0
+        else:
+            brightness = hashes[i]
+
     idx = argrelmax(np.array(hashes), order=order)[0]
     result = []
     old_idx = 0
@@ -292,6 +302,21 @@ def rename_files(dbi: DB, params: argparse.Namespace) -> None:
             conn.commit()
 
 
+def migrate(dbi: DB) -> None:
+    with dbi.getconn() as conn:
+        fi = dbi.get_file_infos(conn)
+        for n, f in enumerate(fi):
+            if dbi.has_hashes(conn, f.fid):
+                continue
+            logging.info("Rehashing %s", f)
+            brightness = dbi.get_brightness(conn, f.fid)
+            extrema = get_extrema(brightness, INDEX_DIST, f.fps)
+            dbi.insert_hashes(conn, f.fid, extrema)
+            conn.commit()
+
+    sys.exit(1)
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -398,6 +423,10 @@ if __name__ == "__main__":
                         default=False,
                         action="store_true",
                         help=argparse.SUPPRESS)
+    parser.add_argument("--migrate",
+                        default=False,
+                        action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--debug",
                         default=False,
                         action="store_true",
@@ -421,6 +450,9 @@ if __name__ == "__main__":
     if params.profile:
         profile = cProfile.Profile()
         profile.enable()
+
+    if params.migrate:
+        migrate(dbi)
 
     if params.fixrenames:
         if params.dir:
