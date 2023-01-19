@@ -8,11 +8,27 @@ from .postgresql_db import FileInfo
 from .postgresql_db import DB
 from .index import Index
 
-__all__ = ["get_db", "FileInfo"]
+__all__ = ["get_db", "FileInfo", "get_njit"]
+
+
+log = logging.getLogger
 
 
 def get_db(params: argparse.Namespace) -> DB:
     return DB(params)
+
+
+def get_njit():
+    try:
+        from numba import njit
+        return njit
+    except ModuleNotFoundError:
+        log(__name__).warning("numba not installed, using plain python nparray.mean")
+
+        def njit(f):
+            return f
+
+        return njit
 
 
 installed_libs = None  # type: Optional[List[str]]

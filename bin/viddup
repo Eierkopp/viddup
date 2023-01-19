@@ -15,15 +15,16 @@ from scipy.signal import argrelmax
 import numpy as np
 import cProfile
 import pstats
-from typing import Iterable, IO, List, Tuple, Any
+import signal
+from types import FrameType
+from typing import Iterable, IO, List, Optional, Tuple, Any
 import warnings
 import yaml
 
-from viddup import DB, get_db, FileInfo, get_index, installed_knn_libs  # noqa: F401  FileInfo needed by yaml Loader
-from viddup import vidhash
+from viddup import FileInfo  # noqa: F401  FileInfo needed by yaml Loader
+from viddup import DB, get_db, vidhash, get_index, installed_knn_libs, get_njit
 from viddup.tools import format_duration, TqdmStream, NCOLS, whitelist, handle_purge
 from viddup.ui import VidDupUI
-
 
 log_stream = TqdmStream(sys.stdout)
 
@@ -42,6 +43,16 @@ logging.basicConfig(level=logging.INFO,
 
 KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts, asf, wmv"
 INDEX_DIST = 10  # seconds
+
+njit = get_njit()
+stop_signal_recieved: bool = False
+
+
+def stop_signal_handler(signum: int, frame: Optional[FrameType]) -> None:
+    global stop_signal_recieved
+    stop_signal_recieved = True
+    logging.info("Signal %s recieved", signal.Signals(signum).name)
+    logging.info("Stopping import after current file")
 
 
 def get_files(basedir: str, vid_ext: Iterable[str]):
@@ -71,6 +82,11 @@ def fix_duration(vidname: str) -> None:
         logging.warning("target %s is not writable, giving up", vidname)
 
 
+@njit
+def np_mean(array):
+    return array.mean()
+
+
 def get_hashes(vidname, fix=True) -> Tuple[List[Tuple[int, float]], float, float, List[float]]:
     video = imageio.get_reader(vidname, vidhash.NAME)
     md = video.get_meta_data()
@@ -89,7 +105,7 @@ def get_hashes(vidname, fix=True) -> Tuple[List[Tuple[int, float]], float, float
     try:
         with tqdm(video.iter_data(), total=nframes, leave=False, ascii=True, ncols=NCOLS) as pb:
             for frame in pb:
-                brightness.append(frame.mean())
+                brightness.append(np_mean(frame))  # frame.mean())
     except KeyboardInterrupt:
         raise
     except imageio.core.format.CannotReadFrameError:
@@ -168,12 +184,17 @@ def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
 
 
 def handle_import(dbi: DB, params: argparse.Namespace) -> None:
+    global stop_signal_recieved
     if params.dir:
         for fname in get_files(params.dir,
                                params.vidext.replace(" ", "").split(",")):
+            if stop_signal_recieved:
+                break
             import_file(dbi, params, fname)
     if params.file:
         for f in glob.glob(params.file):
+            if stop_signal_recieved:
+                break
             import_file(dbi, params, f)
 
 
@@ -437,6 +458,9 @@ if __name__ == "__main__":
                         help=argparse.SUPPRESS)
 
     params = parser.parse_args()
+
+    logging.info("Running with PID %d", os.getpid())
+    signal.signal(signal.SIGHUP, stop_signal_handler)
 
     try:
         nl = os.nice(0)

@@ -1,3 +1,10 @@
+viddup (2.1) unstable; urgency=low
+
+  * very limited numba support
+  * let SIGHUB stop import after finishing the current file
+
+ --  Depperter Depp <depp@eierkopp.ddnss.org>  Thu, 19 Jan 2023 06:24:12 +0100
+
 viddup (2.0) unstable; urgency=low
 
   * handle plateau maxima by using the first frame of the plateau
