@@ -1,3 +1,9 @@
+viddup (2.2) unstable; urgency=low
+
+  * locking added
+
+--  Depperter Depp <depp@eierkopp.ddnss.org>  Mon, 30 Jan 2023 11:16:22 +0100
+
 viddup (2.1) unstable; urgency=low
 
   * very limited numba support

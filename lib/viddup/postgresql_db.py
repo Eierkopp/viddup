@@ -5,6 +5,9 @@ from argparse import Namespace
 from collections import namedtuple
 from contextlib import contextmanager
 import logging
+import os
+import socket
+import time
 from typing import List, Tuple, Generator, Optional
 from psycopg import Connection
 from psycopg_pool import ConnectionPool
@@ -64,6 +67,11 @@ class DB:
                           "(id1 integer not null references filenames(id) on delete cascade,"
                           " id2 integer not null references filenames(id) on delete cascade,"
                           " primary key (id1, id2))")
+                c.execute("create table if not exists locks "
+                          "(name text not null primary key,"
+                          " hostname text not null,"
+                          " pid int not null,"
+                          " time_t float not null)")
             conn.commit()
 
     def is_name_in_db(self, conn, fname: str) -> bool:
@@ -83,6 +91,13 @@ class DB:
     def del_file(self, conn: Connection, fid: int) -> None:
         with conn.cursor() as c:
             c.execute("delete from filenames where id=%s", [fid])
+
+    def try_lock(self, conn: Connection, fname: str) -> None:
+        now = time.time()
+        with conn.cursor() as c:
+            c.execute("delete from locks where time_t < %s", [now - self.params.locktime])
+            c.execute("insert into locks (name, hostname, pid, time_t) values (%s, %s, %s, %s)",
+                      [fname, socket.gethostname(), os.getpid(), time.time()])
 
     def insert_brightness(self, conn: Connection, fid: int, brightness: List[float]) -> None:
         with conn.cursor() as c:

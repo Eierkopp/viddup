@@ -16,6 +16,7 @@ import numpy as np
 import cProfile
 import pstats
 import signal
+import traceback
 from types import FrameType
 from typing import Iterable, IO, List, Optional, Tuple, Any
 import warnings
@@ -155,6 +156,12 @@ def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
             if not params.refresh:
                 logging.info("File %s already imported", fname)
                 return
+        try:
+            dbi.try_lock(conn, fname)
+            conn.commit()
+        except Exception:
+            logging.warning("File %s is locked", fname)
+            return
 
     start_time = time.time()
     with dbi.getconn() as conn:
@@ -447,6 +454,10 @@ if __name__ == "__main__":
     parser.add_argument("--migrate",
                         default=False,
                         action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--locktime",
+                        default=3600.0,
+                        type=float,
                         help=argparse.SUPPRESS)
     parser.add_argument("--debug",
                         default=False,
