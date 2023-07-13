@@ -1,0 +1,9 @@
+#annoy
+#imageio
+imageio-ffmpeg
+#psycopg
+#psycopg-pool
+#pyaml
+#pygobject
+#scipy
+#tqdm

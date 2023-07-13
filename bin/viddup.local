@@ -16,7 +16,6 @@ import numpy as np
 import cProfile
 import pstats
 import signal
-import traceback
 from types import FrameType
 from typing import Iterable, IO, List, Optional, Tuple, Any
 import warnings
@@ -109,8 +108,6 @@ def get_hashes(vidname, fix=True) -> Tuple[List[Tuple[int, float]], float, float
                 brightness.append(np_mean(frame))  # frame.mean())
     except KeyboardInterrupt:
         raise
-    except imageio.core.format.CannotReadFrameError:
-        pass
     except Exception as e:
         logging.warning("Error processing video: %s", e, exc_info=True)
 
@@ -157,7 +154,7 @@ def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
                 logging.info("File %s already imported", fname)
                 return
         try:
-            dbi.try_lock(conn, fname)
+            # dbi.try_lock(conn, fname)
             conn.commit()
         except Exception:
             logging.warning("File %s is locked", fname)
