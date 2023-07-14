@@ -154,7 +154,7 @@ def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
                 logging.info("File %s already imported", fname)
                 return
         try:
-            # dbi.try_lock(conn, fname)
+            dbi.try_lock(conn, fname)
             conn.commit()
         except Exception:
             logging.warning("File %s is locked", fname)
