@@ -98,6 +98,8 @@ def get_hashes(vidname, fix=True) -> Tuple[List[Tuple[int, float]], float, float
         return get_hashes(vidname, False)
 
     duration = md["duration"]
+    if nframes == float("inf"):  # i.e. not reported by imageio
+        nframes = int(fps * duration)
 
     logging.info("Hashing %s %2.2ff/s: %s", format_duration(duration), fps, vidname)
 

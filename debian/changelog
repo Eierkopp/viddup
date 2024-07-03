@@ -1,3 +1,15 @@
+viddup (2.5) unstable; urgency=low
+
+  * fallback nframes calculation
+
+ --  Depperter Depp <depp@eierkopp.ddnss.org>  Wed, 3 Jul 2024 11:22:31 +0200
+
+viddup (2.4) unstable; urgency=low
+
+  * psycopg dependency renamed
+
+ --  Depperter Depp <depp@eierkopp.ddnss.org>  Sun, 14 Apr 2024 18:12:21 +0200
+
 viddup (2.3) unstable; urgency=low
 
   * imageio upgrade
