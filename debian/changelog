@@ -1,3 +1,9 @@
+viddup (2.6) unstable; urgency=low
+
+  * imageio kicked out
+
+ --  Depperter Depp <depp@eierkopp.ddnss.org>  Mon, 17 Mar 2025 09:31:21 +0100
+
 viddup (2.5) unstable; urgency=low
 
   * fallback nframes calculation

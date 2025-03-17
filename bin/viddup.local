@@ -2,49 +2,39 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+from contextlib import closing
 import glob
 from itertools import combinations
 import logging
 import os
-import subprocess
 import time
 import sys
-from tqdm import tqdm
-import imageio
 from scipy.signal import argrelmax
 import numpy as np
 import cProfile
 import pstats
 import signal
+from tqdm import tqdm
 from types import FrameType
 from typing import Iterable, IO, List, Optional, Tuple, Any
-import warnings
 import yaml
 
 from viddup import FileInfo  # noqa: F401  FileInfo needed by yaml Loader
-from viddup import DB, get_db, vidhash, get_index, installed_knn_libs, get_njit
+from viddup import DB, get_db, get_index, installed_knn_libs, ffmpeg
 from viddup.tools import format_duration, TqdmStream, NCOLS, whitelist, handle_purge
 from viddup.ui import VidDupUI
 
 log_stream = TqdmStream(sys.stdout)
 
-
-# send imageio warnings to log stream
-def showwarning(message, category, filename, lineno, file=None, line=None):
-    text = warnings.formatwarning(message, category, filename, lineno, line)
-    log_stream.write(text)
-
-
-warnings.showwarning = showwarning
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)-15s;%(levelname)s;%(message)s',
-                    stream=log_stream)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)-15s;%(levelname)s;%(message)s",
+    stream=log_stream,
+)
 
 KNOWN_VID_TYPES_DEFAULT = "mp4, mkv, avi, ts, asf, wmv"
 INDEX_DIST = 10  # seconds
 
-njit = get_njit()
 stop_signal_recieved: bool = False
 
 
@@ -69,55 +59,38 @@ def get_files(basedir: str, vid_ext: Iterable[str]):
                     yield fname
 
 
-def fix_duration(vidname: str) -> None:
-    wd = os.path.dirname(vidname)
-    if os.access(vidname, os.W_OK) and os.access(wd, os.W_OK):
-        with open(vidname, "rb") as f:
-            os.remove(vidname)
-            proc = subprocess.Popen(["ffmpeg", "-i", "pipe:",
-                                     "-vcodec", "copy",
-                                     "-acodec", "copy", vidname], stdin=f)
-            proc.wait()
-    else:
-        logging.warning("target %s is not writable, giving up", vidname)
+def get_hashes(
+    vidname, fix=True
+) -> Tuple[List[Tuple[int, float]], float, float, List[float]]:
+    hasher = ffmpeg.HashStream(vidname)
 
-
-@njit
-def np_mean(array):
-    return array.mean()
-
-
-def get_hashes(vidname, fix=True) -> Tuple[List[Tuple[int, float]], float, float, List[float]]:
-    video = imageio.get_reader(vidname, vidhash.NAME)
-    md = video.get_meta_data()
-    fps = md["fps"]
-    nframes = md["nframes"]
-    if ("duration" not in md or md["duration"] > 3 * 3600) and fix:
-        fix_duration(vidname)
-        logging.info("Duration of %s hopefully fixed", vidname)
-        return get_hashes(vidname, False)
-
-    duration = md["duration"]
-    if nframes == float("inf"):  # i.e. not reported by imageio
-        nframes = int(fps * duration)
-
-    logging.info("Hashing %s %2.2ff/s: %s", format_duration(duration), fps, vidname)
+    logging.info(
+        "Hashing %s %2.2ff/s: %s", format_duration(hasher.duration), hasher.fps, vidname
+    )
 
     brightness = []
     try:
-        with tqdm(video.iter_data(), total=nframes, leave=False, ascii=True, ncols=NCOLS) as pb:
-            for frame in pb:
-                brightness.append(np_mean(frame))  # frame.mean())
+        with tqdm(
+            hasher.read_hashes(),
+            total=hasher.nframes,
+            leave=False,
+            ascii=True,
+            ncols=NCOLS,
+        ) as pb:
+            for hash in pb:
+                brightness.append(hash)
     except KeyboardInterrupt:
         raise
     except Exception as e:
         logging.warning("Error processing video: %s", e, exc_info=True)
 
-    extrema = get_extrema(brightness, INDEX_DIST, fps)
-    return extrema, fps, duration, brightness
+    extrema = get_extrema(brightness, INDEX_DIST, hasher.fps)
+    return extrema, hasher.fps, hasher.duration, brightness
 
 
-def get_extrema(hashes: List[float], min_dist: float, fps: float) -> List[Tuple[int, float]]:
+def get_extrema(
+    hashes: List[float], min_dist: float, fps: float
+) -> List[Tuple[int, float]]:
     """Take the list of brightness values per frame and compute
     a list of pairs (frame number and distance[s] of local maxima)"""
 
@@ -136,7 +109,7 @@ def get_extrema(hashes: List[float], min_dist: float, fps: float) -> List[Tuple[
     result = []
     old_idx = 0
     for i in idx:
-        result.append((int(i), (i - old_idx)/fps))
+        result.append((int(i), (i - old_idx) / fps))
         old_idx = i
     return result
 
@@ -165,12 +138,7 @@ def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
     start_time = time.time()
     with dbi.getconn() as conn:
         try:
-
-            # make sure disks have spun up
-            with open(fname, "rb") as f:
-                f.read(1024)
-
-            index_info, fps, duration, brightness = get_hashes(fname, params.fixduration)
+            index_info, fps, duration, brightness = get_hashes(fname)
 
             fi = dbi.insert_file(conn, fname, fps, duration)
 
@@ -178,9 +146,11 @@ def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
 
             dbi.insert_brightness(conn, fi.fid, brightness)
 
-            logging.info("File %s imported in %s",
-                         fname,
-                         format_duration(time.time() - start_time))
+            logging.info(
+                "File %s imported in %s",
+                fname,
+                format_duration(time.time() - start_time),
+            )
             conn.commit()
         except KeyboardInterrupt:
             logging.warning("Aborted")
@@ -192,8 +162,7 @@ def import_file(dbi: DB, params: argparse.Namespace, fname: str) -> None:
 def handle_import(dbi: DB, params: argparse.Namespace) -> None:
     global stop_signal_recieved
     if params.dir:
-        for fname in get_files(params.dir,
-                               params.vidext.replace(" ", "").split(",")):
+        for fname in get_files(params.dir, params.vidext.replace(" ", "").split(",")):
             if stop_signal_recieved:
                 break
             import_file(dbi, params, fname)
@@ -225,8 +194,9 @@ def handle_search(dbi: DB, params: argparse.Namespace) -> None:
             logging.info("Group of %d files found", len(match))
             for row in match:
                 fileinfo, offset = row
-                logging.info("ffplay -ss %s '%s'",
-                             format_duration(offset), fileinfo.name)
+                logging.info(
+                    "ffplay -ss %s '%s'", format_duration(offset), fileinfo.name
+                )
 
 
 def fetch_duplicates(dbi: DB, f: IO) -> List[List[List[Any]]]:
@@ -266,7 +236,9 @@ def handle_searchres(dbi: DB, params: argparse.Namespace) -> None:
             logging.info("Group of %d files found", len(match))
             for row in match:
                 fileinfo, offset = row
-                logging.info("ffplay -ss %s '%s'", format_duration(offset), fileinfo.name)
+                logging.info(
+                    "ffplay -ss %s '%s'", format_duration(offset), fileinfo.name
+                )
 
 
 def fixfilenames(args: argparse.Namespace) -> None:
@@ -345,127 +317,137 @@ def migrate(dbi: DB) -> None:
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
-    parser.add_argument("--purge",
-                        default=False,
-                        action="store_true",
-                        help="Purge deleted files from database (dry run mode)")
-    parser.add_argument("--delete",
-                        default=False,
-                        action="store_true",
-                        help="Really delete from database in purge")
-    parser.add_argument("--nice",
-                        type=int,
-                        help="Nice level for background operation, default 5",
-                        default=5)
-    parser.add_argument("--dir",
-                        help="Import video hashes from directory and its subdirectories")
-    parser.add_argument("--file",
-                        help="Import video hashes for a single file or a glob like '*.mp4'")
-    parser.add_argument("--refresh",
-                        action="store_true",
-                        help="Re-hash file but keep whitelistings intact",
-                        default=False)
-    parser.add_argument("--search",
-                        action="store_true",
-                        help="Search duplicates in database")
-    parser.add_argument("--ignore_start",
-                        type=int,
-                        default=0,
-                        help="Ignore search results startin in"
-                        " the first seconds of a movie, default 0")
-    parser.add_argument("--ignore_end",
-                        type=int,
-                        default=0,
-                        help="Ignore search results starting in the last"
-                        " seconds of a movie, default 0")
-    parser.add_argument("--dbhost",
-                        help="PostgreSQL database server host",
-                        default="gateway")
-    parser.add_argument("--dbport",
-                        type=int,
-                        help="PostgreSQL database server port",
-                        default=5432)
-    parser.add_argument("--dbname",
-                        help="PostgreSQL database name",
-                        default="viddup")
-    parser.add_argument("--dbuser",
-                        help="PostgreSQL database user name",
-                        default="viddup")
-    parser.add_argument("--dbpwd",
-                        help="PostgreSQL database user password",
-                        default="viddup")
-    parser.add_argument("--indexlength",
-                        default=10,
-                        type=int,
-                        help="Length of index in searches, smaller"
-                        " values will produce more false positives, default 10")
-    parser.add_argument("--scenelength",
-                        default=300,
-                        type=int,
-                        help="Length in seconds of scenes to match, default 300")
-    parser.add_argument("--radius",
-                        default=3.0,
-                        type=float,
-                        help="Measure for acceptable index difference. Higher"
-                        " values will result in more false positives, default 3.0")
-    parser.add_argument("--ui",
-                        action="store_true",
-                        help="Launch ui after search")
-    parser.add_argument("--searchres",
-                        help="Filename of search result, used"
-                        " in --search and --ui without --search")
-    parser.add_argument("--step",
-                        type=int,
-                        default=1,
-                        help="Step width for searching index, default 1")
-    parser.add_argument("--whitelist",
-                        nargs='+',
-                        help="Whitelist a list of files")
-    parser.add_argument("--knnlib",
-                        default=None,
-                        help="knn library to use, choose " + ", ".join(installed_knn_libs()))
-    parser.add_argument("--vidext",
-                        default=KNOWN_VID_TYPES_DEFAULT,
-                        help="filename extensions to consider,"
-                        " default %s" % KNOWN_VID_TYPES_DEFAULT)
-    parser.add_argument("--fixduration",
-                        default=False,
-                        action="store_true",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--fixrenames",
-                        default=False,
-                        action="store_true",
-                        help="try to fix database filenames for moved files")
-    parser.add_argument("--rename",
-                        nargs=2,
-                        help="rename files in filesystem and database")
-    parser.add_argument("--fixspeed",
-                        default=False,
-                        action="store_true",
-                        help="Make search more robust for time-scaled videos, "
-                        "increase indexlength to reduce number of false positives")
-    parser.add_argument("--fixfilenames",
-                        default=False,
-                        action="store_true",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--migrate",
-                        default=False,
-                        action="store_true",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--locktime",
-                        default=3600.0,
-                        type=float,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--debug",
-                        default=False,
-                        action="store_true",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--profile",
-                        default=False,
-                        action="store_true",
-                        help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--purge",
+        default=False,
+        action="store_true",
+        help="Purge deleted files from database (dry run mode)",
+    )
+    parser.add_argument(
+        "--delete",
+        default=False,
+        action="store_true",
+        help="Really delete from database in purge",
+    )
+    parser.add_argument(
+        "--nice",
+        type=int,
+        help="Nice level for background operation, default 5",
+        default=5,
+    )
+    parser.add_argument(
+        "--dir", help="Import video hashes from directory and its subdirectories"
+    )
+    parser.add_argument(
+        "--file", help="Import video hashes for a single file or a glob like '*.mp4'"
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Re-hash file but keep whitelistings intact",
+        default=False,
+    )
+    parser.add_argument(
+        "--search", action="store_true", help="Search duplicates in database"
+    )
+    parser.add_argument(
+        "--ignore_start",
+        type=int,
+        default=0,
+        help="Ignore search results startin in"
+        " the first seconds of a movie, default 0",
+    )
+    parser.add_argument(
+        "--ignore_end",
+        type=int,
+        default=0,
+        help="Ignore search results starting in the last"
+        " seconds of a movie, default 0",
+    )
+    parser.add_argument(
+        "--dbhost", help="PostgreSQL database server host", default="gateway"
+    )
+    parser.add_argument(
+        "--dbport", type=int, help="PostgreSQL database server port", default=5432
+    )
+    parser.add_argument("--dbname", help="PostgreSQL database name", default="viddup")
+    parser.add_argument(
+        "--dbuser", help="PostgreSQL database user name", default="viddup"
+    )
+    parser.add_argument(
+        "--dbpwd", help="PostgreSQL database user password", default="viddup"
+    )
+    parser.add_argument(
+        "--indexlength",
+        default=10,
+        type=int,
+        help="Length of index in searches, smaller"
+        " values will produce more false positives, default 10",
+    )
+    parser.add_argument(
+        "--scenelength",
+        default=300,
+        type=int,
+        help="Length in seconds of scenes to match, default 300",
+    )
+    parser.add_argument(
+        "--radius",
+        default=3.0,
+        type=float,
+        help="Measure for acceptable index difference. Higher"
+        " values will result in more false positives, default 3.0",
+    )
+    parser.add_argument("--ui", action="store_true", help="Launch ui after search")
+    parser.add_argument(
+        "--searchres",
+        help="Filename of search result, used" " in --search and --ui without --search",
+    )
+    parser.add_argument(
+        "--step", type=int, default=1, help="Step width for searching index, default 1"
+    )
+    parser.add_argument("--whitelist", nargs="+", help="Whitelist a list of files")
+    parser.add_argument(
+        "--knnlib",
+        default=None,
+        help="knn library to use, choose " + ", ".join(installed_knn_libs()),
+    )
+    parser.add_argument(
+        "--vidext",
+        default=KNOWN_VID_TYPES_DEFAULT,
+        help="filename extensions to consider," " default %s" % KNOWN_VID_TYPES_DEFAULT,
+    )
+    parser.add_argument(
+        "--fixrenames",
+        default=False,
+        action="store_true",
+        help="try to fix database filenames for moved files",
+    )
+    parser.add_argument(
+        "--rename", nargs=2, help="rename files in filesystem and database"
+    )
+    parser.add_argument(
+        "--fixspeed",
+        default=False,
+        action="store_true",
+        help="Make search more robust for time-scaled videos, "
+        "increase indexlength to reduce number of false positives",
+    )
+    parser.add_argument(
+        "--fixfilenames", default=False, action="store_true", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--migrate", default=False, action="store_true", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--locktime", default=3600.0, type=float, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--debug", default=False, action="store_true", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--profile", default=False, action="store_true", help=argparse.SUPPRESS
+    )
 
     params = parser.parse_args()
 
@@ -479,48 +461,48 @@ if __name__ == "__main__":
     except Exception:
         logging.info("Setting nice level not supported")
 
-    dbi = get_db(params)
+    with closing(get_db(params)) as dbi:
 
-    if params.profile:
-        profile = cProfile.Profile()
-        profile.enable()
+        if params.profile:
+            profile = cProfile.Profile()
+            profile.enable()
 
-    if params.migrate:
-        migrate(dbi)
+        if params.migrate:
+            migrate(dbi)
 
-    if params.fixrenames:
-        if params.dir:
-            fix_moved_files(dbi, params)
-        else:
-            logging.error("please set --dir option as well")
-            sys.exit(1)
+        if params.fixrenames:
+            if params.dir:
+                fix_moved_files(dbi, params)
+            else:
+                logging.error("please set --dir option as well")
+                sys.exit(1)
 
-    if params.rename:
-        rename_files(dbi, params)
+        if params.rename:
+            rename_files(dbi, params)
 
-    if params.fixfilenames:
-        if params.dir:
-            fixfilenames(params)
-        else:
-            logging.error("please set --dir option as well")
-            sys.exit(1)
+        if params.fixfilenames:
+            if params.dir:
+                fixfilenames(params)
+            else:
+                logging.error("please set --dir option as well")
+                sys.exit(1)
 
-    if params.whitelist:
-        whitelist(dbi, params)
+        if params.whitelist:
+            whitelist(dbi, params)
 
-    if params.purge:
-        handle_purge(dbi, params)
+        if params.purge:
+            handle_purge(dbi, params)
 
-    if params.dir or params.file:
-        handle_import(dbi, params)
+        if params.dir or params.file:
+            handle_import(dbi, params)
 
-    if params.search:
-        handle_search(dbi, params)
-    elif params.searchres:
-        handle_searchres(dbi, params)
+        if params.search:
+            handle_search(dbi, params)
+        elif params.searchres:
+            handle_searchres(dbi, params)
 
-    if params.profile:
-        profile.create_stats()
-        s = pstats.Stats(profile)
-        s.sort_stats("cumulative")
-        s.print_stats(50)
+        if params.profile:
+            profile.create_stats()
+            s = pstats.Stats(profile)
+            s.sort_stats("cumulative")
+            s.print_stats(50)
