@@ -2,7 +2,7 @@ import argparse
 import importlib
 import logging
 import sys
-from typing import List, Optional
+from typing import List
 
 from .postgresql_db import FileInfo
 from .postgresql_db import DB
@@ -21,6 +21,7 @@ def get_db(params: argparse.Namespace) -> DB:
 def get_njit():
     try:
         from numba import njit
+
         return njit
     except ModuleNotFoundError:
         log(__name__).warning("numba not installed, using plain python nparray.mean")
@@ -72,12 +73,15 @@ def get_index(dbi: DB, args: argparse.Namespace) -> Index:
 
     if lib == "annoy":
         from .annoy_index import AnnoyIndex
+
         return AnnoyIndex(dbi, args)
     if lib == "cyflann":
         from .cyflann_index import CyflannIndex
+
         return CyflannIndex(dbi, args)
     if lib == "hnswlib":
         from .hnswlib_index import HnswlibIndex
+
         return HnswlibIndex(dbi, args)
 
     raise ModuleNotFoundError()

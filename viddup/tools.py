@@ -16,7 +16,6 @@ NCOLS = 70
 
 
 class TqdmStream:
-
     def __init__(self, stream: TextIO) -> None:
         self.stream = stream
 
@@ -31,8 +30,9 @@ def format_duration(seconds: float) -> str:
     return time.strftime("%H:%M:%S", time.gmtime(seconds))
 
 
-def whitelist(dbi: DB, params: argparse.Namespace, files: Optional[List[str]] = None) -> None:
-
+def whitelist(
+    dbi: DB, params: argparse.Namespace, files: Optional[List[str]] = None
+) -> None:
     Entry = namedtuple("Entry", "name, fid")
 
     if files is None:
@@ -57,17 +57,19 @@ def whitelist(dbi: DB, params: argparse.Namespace, files: Optional[List[str]] = 
                 logging.info("Whitelisted %s and %s" % (f1.name, f2.name))
                 conn.commit()
             except Exception:
-                logging.error("Failed to whitelist pair %s - %s", f1.name, f2.name, exc_info=False)
+                logging.error(
+                    "Failed to whitelist pair %s - %s", f1.name, f2.name, exc_info=False
+                )
                 conn.rollback()
 
 
-def handle_purge(dbi: DB, params: argparse.Namespace, do_delete: Optional[bool] = None) -> None:
-
+def handle_purge(
+    dbi: DB, params: argparse.Namespace, do_delete: Optional[bool] = None
+) -> None:
     if do_delete is None:
         do_delete = params.delete
 
     with dbi.getconn() as conn:
-
         dbi.tidy_db(conn)
 
         del_files = []
@@ -77,9 +79,7 @@ def handle_purge(dbi: DB, params: argparse.Namespace, do_delete: Optional[bool] 
             if not os.access(fi.name, os.R_OK):
                 del_files.append(fi)
 
-        logging.warning("Need to delete %d of %d files",
-                        len(del_files),
-                        len(fn_fis))
+        logging.warning("Need to delete %d of %d files", len(del_files), len(fn_fis))
         if do_delete:
             for fi in del_files:
                 logging.info("deleting %s", fi.name)
