@@ -9,7 +9,7 @@ import subprocess
 
 CROP_FLT = "crop=in_w/10:in_h/10:in_w*0.45:in_h*0.45"
 OUT_FMT = "-f image2pipe -pix_fmt rgb24 -vcodec rawvideo"
-OPT_FLAGS = ""  # "-hwaccel vaapi"
+OPT_FLAGS = "-hwaccel vaapi"
 
 
 class HashStream:
@@ -22,9 +22,9 @@ class HashStream:
 
     def fetch_frame_bytes(self):
         data = subprocess.check_output(
-            shlex.split(
-                f"ffmpeg -v 0 -i {self.vidname} -an -vf '{CROP_FLT}' {OUT_FMT} -vframes 1 pipe:"
-            )
+            shlex.split("ffmpeg -v 0 -i")
+            + [self.vidname]
+            + shlex.split(f"-an -vf '{CROP_FLT}' {OUT_FMT} -vframes 1 pipe:")
         )
         return len(data)
 
@@ -32,8 +32,9 @@ class HashStream:
 
         data = subprocess.check_output(
             shlex.split(
-                f"ffprobe -v 0 -of json -select_streams v:0 -show_entries format:stream {self.vidname}"
-            ),
+                "ffprobe -v 0 -of json -select_streams v:0 -show_entries format:stream"
+            )
+            + [self.vidname],
             encoding="utf-8",
         )
         details = json.loads(data)
@@ -47,8 +48,10 @@ class HashStream:
         return fps, duration
 
     def read_hashes(self):
-        cmd = shlex.split(
-            f"ffmpeg {OPT_FLAGS} -i {self.vidname} -an -vf '{CROP_FLT}' {OUT_FMT} pipe:"
+        cmd = (
+            shlex.split(f"ffmpeg {OPT_FLAGS} -i")
+            + [self.vidname]
+            + shlex.split(f"-an -vf '{CROP_FLT}' {OUT_FMT} pipe:")
         )
         try:
             with subprocess.Popen(
